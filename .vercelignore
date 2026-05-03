@@ -1,0 +1,11 @@
+.browser_profile
+.env
+.tmp
+.uv-cache
+.venv
+__pycache__
+*.pyc
+config.yaml
+logs
+*.log
+venv

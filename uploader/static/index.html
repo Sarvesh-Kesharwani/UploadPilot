@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UploadPilot</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css?v=account-20260503-1" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <img class="app-logo" src="/static/logo.svg" width="54" height="54" alt="UploadPilot logo" />
+        <div>
+          <h1>UploadPilot</h1>
+          <div class="muted">Local automation | batch upload | auto-rename</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="header-status">
+          <span class="status-dot"></span>
+          <span>Local server online</span>
+        </div>
+        <div id="drive-status" class="summary-pill">Drive signed out</div>
+        <button id="google-signin" class="primary">Sign in with Google</button>
+        <button id="google-signout">Sign out</button>
+      </div>
+    </header>
+
+    <section class="hero-panel">
+      <div>
+        <p class="section-label">Upload console</p>
+        <h2>Queue YouLearn videos with fewer manual checks.</h2>
+      </div>
+      <div class="pipeline">
+        <span>Upload</span>
+        <span>Settle</span>
+        <span>Rename</span>
+        <span>Validate</span>
+      </div>
+    </section>
+
+    <section class="card form-card">
+      <div class="section-heading">
+        <div>
+          <p class="section-label">Run setup</p>
+          <h2>Target and mode</h2>
+        </div>
+      </div>
+      <div class="row">
+        <label>Space URL
+          <input id="space" type="url" placeholder="https://app.youlearn.ai/space/..." />
+        </label>
+      </div>
+      <div class="row">
+        <label>Videos folder
+          <input id="folder" type="text" placeholder="D:\courses\ethics" />
+        </label>
+        <button id="preview">Preview</button>
+      </div>
+      <fieldset class="mode-picker">
+        <legend>Upload mode</legend>
+        <label class="mode-option">
+          <input type="radio" name="mode" value="sequential" checked />
+          <span>
+            <strong>Sequential e2e</strong>
+            <small>Upload, settle, rename, validate each video before next.</small>
+          </span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="mode" value="smart" />
+          <span>
+            <strong>Smart faster</strong>
+            <small>Upload missing videos first, then settle and rename from start to end.</small>
+          </span>
+        </label>
+      </fieldset>
+      <div id="preview-out" class="preview-out"></div>
+      <div class="row actions">
+        <button id="start" class="primary">Start upload</button>
+        <button id="cancel">Cancel</button>
+      </div>
+    </section>
+
+    <section class="card drive-card">
+      <div class="section-heading">
+        <div>
+          <p class="section-label">Account</p>
+          <h2>Google Drive restore</h2>
+        </div>
+      </div>
+      <div class="restore-box">
+        <div>
+          <strong>Drive backup restore</strong>
+          <div id="restore-status" class="muted">Sign in to check yesterday backup.</div>
+        </div>
+        <button id="restore-yesterday">Restore Yesterday</button>
+      </div>
+    </section>
+
+    <section class="card progress-card">
+      <div class="section-heading">
+        <div>
+          <p class="section-label">Live progress</p>
+          <h2>Batch status</h2>
+        </div>
+        <div class="progress-actions">
+          <button id="clear-last-batch">Clear last batch</button>
+          <div id="summary" class="summary-pill">idle</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="items">
+          <thead>
+            <tr>
+              <th>Video #</th>
+              <th>Local video full name</th>
+              <th>YouLearn title</th>
+              <th>Status</th>
+              <th>Error</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="/static/drive-sync.js?v=account-20260503-1"></script>
+  <script src="/static/app.js?v=account-20260503-1"></script>
+</body>
+</html>

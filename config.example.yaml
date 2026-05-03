@@ -1,0 +1,31 @@
+# Copy to config.yaml and adjust.
+server:
+  host: 127.0.0.1
+  port: 8765
+
+browser:
+  # Persistent profile dir for Chromium cookies and session state.
+  profile_dir: .browser_profile
+  headless: true           # run uploads without opening a visible browser window
+  slow_mo_ms: 0            # set higher only when debugging browser automation
+
+youlearn:
+  dashboard_url: https://app.youlearn.ai/
+  login_url: https://app.youlearn.ai/signin
+  # Poll interval while waiting for an uploaded video to appear in the list.
+  list_poll_interval_s: 2
+  list_poll_timeout_s: 900 # 15 min per video; large lectures take a while
+  # YouLearn may auto-generate a title after processing. Wait for that pass,
+  # then do the final rename so the filename is not overwritten later.
+  post_upload_settle_s: 240
+  post_upload_settle_poll_s: 15
+
+uploads:
+  # Extensions to pick up recursively from the folder (lowercase, with dot).
+  extensions: [.txt, .pdf, .mp4, .mov, .mkv, .webm, .avi, .m4v]
+  # Sort order for the upload queue.
+  sort: name_asc           # name_asc | name_desc | mtime_asc | mtime_desc
+
+auth:
+  # Prefer .env VITE_GOOGLE_CLIENT_ID. This field exists only for local fallback.
+  google_client_id:

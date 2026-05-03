@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.browser_profile/
+.env
+logs/
+*.log
+config.yaml
+.tmp/
+.uv-cache/
+.deploy_vercel/
+.vercel/
+screenshots/
+.DS_Store

@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="UploadPilot logo">
+  <defs>
+    <linearGradient id="tile" x1="16" x2="84" y1="10" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#101827" />
+      <stop offset="1" stop-color="#07111f" />
+    </linearGradient>
+    <linearGradient id="blue" x1="58" x2="80" y1="18" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ee7ff" />
+      <stop offset=".48" stop-color="#2d8cff" />
+      <stop offset="1" stop-color="#1765ff" />
+    </linearGradient>
+    <linearGradient id="line" x1="17" x2="73" y1="80" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6ee7ff" stop-opacity=".2" />
+      <stop offset="1" stop-color="#4f8cff" stop-opacity=".65" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#020713" flood-opacity=".42" />
+    </filter>
+  </defs>
+
+  <rect width="96" height="96" rx="22" fill="url(#tile)" />
+  <path d="M17 76c12-1 21-8 31-19 9-10 15-17 31-17" fill="none" stroke="url(#line)" stroke-width="3" stroke-linecap="round" opacity=".8" />
+  <circle cx="76" cy="22" r="5" fill="#6ee7ff" opacity=".9" />
+
+  <g filter="url(#shadow)">
+    <path d="M25 29v28c0 14 8 22 21 22 10 0 17-5 21-13" fill="none" stroke="#f8fbff" stroke-width="10" stroke-linecap="round" />
+    <path d="M56 75V26" fill="none" stroke="#f8fbff" stroke-width="10" stroke-linecap="round" />
+    <path d="M58 28h15c10 0 17 7 17 17s-7 17-17 17H58" fill="none" stroke="url(#blue)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+    <path d="M58 45h22" fill="none" stroke="#7ddcff" stroke-width="7" stroke-linecap="round" opacity=".95" />
+  </g>
+
+  <path d="M69 21v12" fill="none" stroke="#6ee7ff" stroke-width="4" stroke-linecap="round" />
+  <path d="M64 26l5-5 5 5" fill="none" stroke="#6ee7ff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
