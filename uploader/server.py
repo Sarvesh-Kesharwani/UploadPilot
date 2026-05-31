@@ -122,6 +122,22 @@ def upload_history():
 
 
 @app.post("/api/preview")
+
+@app.post("/api/folder/pick")
+def pick_folder(req: PickFolderReq):
+    initial = req.folder.strip() if req.folder else str(Path.home() / "Videos")
+    try:
+        import tkinter.filedialog, tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        chosen = tkinter.filedialog.askdirectory(initialdir=initial, title="Choose videos folder")
+        root.destroy()
+    except Exception:
+        raise HTTPException(500, "Folder picker not available in this environment")
+    if not chosen:
+        return {"folder": ""}
+    return {"folder": str(Path(chosen))}
 def preview(req: PreviewReq):
     try:
         items = scan_folder(Path(req.folder), cfg.uploads.extensions, cfg.uploads.sort)

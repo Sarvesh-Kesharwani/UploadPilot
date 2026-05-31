@@ -4,6 +4,8 @@ const summary = $("#summary");
 const startBtn = $("#start");
 const setupCard = document.querySelector(".form-card");
 const driveStatus = $("#drive-status");
+const openSpaceBtn = $("#open-space");
+const pickFolderBtn = $("#pick-folder");
 const restoreBtn = $("#restore-yesterday");
 const googleSigninBtn = $("#google-signin");
 const googleSignoutBtn = $("#google-signout");
@@ -326,6 +328,7 @@ function setEditBlocked(blocked) {
   $("#preview").disabled = blocked;
   startBtn.disabled = blocked || startBtn.textContent === "Uploading...";
   document.querySelectorAll('input[name="mode"]').forEach((input) => { input.disabled = blocked; });
+  pickFolderBtn.disabled = blocked;
 }
 
 function setDriveStatus(info) {
@@ -574,3 +577,44 @@ async function refreshRestoreInfo() {
 initDriveSync().catch((err) => {
   driveStatus.textContent = err.message;
 });
+openSpaceBtn.onclick = () => {
+  const url = $("#space").value.trim();
+  if (url) window.open(url, "_blank", "noreferrer");
+};
+
+openSpaceBtn.href = "#";
+
+pickFolderBtn.onclick = async () => {
+  saveLocalForm();
+  const current = $("#folder").value.trim();
+  let r;
+  try {
+    r = await fetch(apiUrl("/api/folder/pick"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ folder: current }),
+    });
+  } catch (err) {
+    alert("Folder picker failed: " + localServerError(err));
+    return;
+  }
+  if (!r.ok) {
+    alert("Folder picker failed: " + await r.text());
+    return;
+  }
+  const data = await r.json();
+  if (data.folder) {
+    $("#folder").value = data.folder;
+    ls.setItem("folder", data.folder);
+    window.UploadPilotDrive?.scheduleSave();
+  }
+};
+
+["space"].forEach((id) => {
+  $(`#${id}`).addEventListener("input", () => {
+    saveLocalForm();
+    const url = $("#space").value.trim();
+    openSpaceBtn.href = url || "#";
+  });
+});
+

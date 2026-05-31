@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UploadPilot</title>
   <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/styles.css?v=progress-20260512-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=folder-picker-20260531-1" />
 </head>
 <body>
   <main class="app-shell">
@@ -32,11 +32,13 @@
       <div class="row">
         <label>Space URL
           <input id="space" type="url" placeholder="https://app.youlearn.ai/space/..." />
+          <a id="open-space" class="button-link" target="_blank" rel="noreferrer">Open</a>
         </label>
       </div>
       <div class="row">
         <label>Videos folder
-          <input id="folder" type="text" placeholder="D:\courses\ethics" />
+          <input id="folder" type="text" placeholder="Choose a folder" readonly />
+          <button id="pick-folder">Choose</button>
         </label>
         <button id="preview">Preview</button>
       </div>
@@ -96,7 +98,7 @@
   </main>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="/static/drive-sync.js?v=progress-20260512-1"></script>
-  <script src="/static/app.js?v=progress-20260512-1"></script>
+  <script src="/static/drive-sync.js?v=folder-picker-20260531-1"></script>
+  <script src="/static/app.js?v=folder-picker-20260531-1"></script>
 </body>
 </html>
