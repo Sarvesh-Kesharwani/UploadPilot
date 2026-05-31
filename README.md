@@ -24,9 +24,13 @@ UploadPilot is a local Python + Playwright tool that uploads a folder of files t
 2. Paste the space URL, for example `https://app.youlearn.ai/space/d9e3441968ab4d4d`.
 3. Paste the local folder path, for example `D:\courses\ethics`.
 4. Click `Preview` to confirm the file list and order.
-5. Click `Start upload`. The table shows live status per file: `queued -> uploading -> renaming -> validating -> uploaded`.
+5. Click `Start upload`. The table shows live status and a per-video progress bar for each file: `queued -> uploading -> settling -> renaming -> validating -> uploaded`.
 
 Files are uploaded one at a time. The worker waits for each upload to appear in the space listing before moving on, then renames it back to the original queued title. Nested files are scanned recursively; their queued titles include the relative folder path.
+
+## Rename recovery
+
+UploadPilot keeps a local recovery ledger in `.state/upload_history.json` and syncs that ledger through the private Drive payload when Google Drive sync is enabled. Each uploaded row stores the source path, target YouLearn title, YouLearn's generated `youlearn_ai_name`, latest known YouLearn title, content URL when available, space URL/path, status, and upload/rename/validation timestamps. If the app or machine stops after upload but before rename, reopen the dashboard and use the row-level `Continue rename` button. If a video later has the wrong title, use `Retry naming` on that row to re-check YouLearn and apply the target title again. If the uploaded item itself needs to be recreated, use `Retry upload` on that row to upload the saved local file again and run the settle/rename flow for the new item.
 
 ## Configuration
 

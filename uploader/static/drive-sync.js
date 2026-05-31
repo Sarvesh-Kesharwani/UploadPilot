@@ -161,7 +161,9 @@
   }
 
   async function apiFetch(url, init = {}) {
-    const res = await fetch(url, {
+    const apiBase = state.config?.apiBase || "";
+    const targetUrl = apiBase && url.startsWith("/") ? `${apiBase}${url}` : url;
+    const res = await fetch(targetUrl, {
       ...init,
       headers: {
         ...(init.headers || {}),

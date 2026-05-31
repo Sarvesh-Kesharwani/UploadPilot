@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UploadPilot</title>
   <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/styles.css?v=account-20260503-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=progress-20260512-1" />
 </head>
 <body>
   <main class="app-shell">
@@ -18,35 +18,16 @@
         </div>
       </div>
       <div class="header-actions">
-        <div class="header-status">
-          <span class="status-dot"></span>
-          <span>Local server online</span>
-        </div>
-        <div id="drive-status" class="summary-pill">Drive signed out</div>
+        <div id="drive-status" class="summary-pill hidden" aria-live="polite"></div>
+        <button id="restore-yesterday">Restore Yesterday</button>
         <button id="google-signin" class="primary">Sign in with Google</button>
-        <button id="google-signout">Sign out</button>
+        <button id="google-signout" class="hidden">Sign out</button>
       </div>
     </header>
 
-    <section class="hero-panel">
-      <div>
-        <p class="section-label">Upload console</p>
-        <h2>Queue YouLearn videos with fewer manual checks.</h2>
-      </div>
-      <div class="pipeline">
-        <span>Upload</span>
-        <span>Settle</span>
-        <span>Rename</span>
-        <span>Validate</span>
-      </div>
-    </section>
-
     <section class="card form-card">
       <div class="section-heading">
-        <div>
-          <p class="section-label">Run setup</p>
-          <h2>Target and mode</h2>
-        </div>
+        <h2>Upload setup</h2>
       </div>
       <div class="row">
         <label>Space URL
@@ -83,28 +64,9 @@
       </div>
     </section>
 
-    <section class="card drive-card">
-      <div class="section-heading">
-        <div>
-          <p class="section-label">Account</p>
-          <h2>Google Drive restore</h2>
-        </div>
-      </div>
-      <div class="restore-box">
-        <div>
-          <strong>Drive backup restore</strong>
-          <div id="restore-status" class="muted">Sign in to check yesterday backup.</div>
-        </div>
-        <button id="restore-yesterday">Restore Yesterday</button>
-      </div>
-    </section>
-
     <section class="card progress-card">
       <div class="section-heading">
-        <div>
-          <p class="section-label">Live progress</p>
-          <h2>Batch status</h2>
-        </div>
+        <h2>Batch status</h2>
         <div class="progress-actions">
           <button id="clear-last-batch">Clear last batch</button>
           <div id="summary" class="summary-pill">idle</div>
@@ -115,11 +77,16 @@
           <thead>
             <tr>
               <th>Video #</th>
-              <th>Local video full name</th>
-              <th>YouLearn title</th>
+              <th>Local video</th>
+              <th>Target YouLearn name</th>
+              <th>YouLearn AI name</th>
+              <th>Current YouLearn name</th>
+              <th>Progress</th>
               <th>Status</th>
               <th>Error</th>
-              <th>Action</th>
+              <th>Continue</th>
+              <th>Retry naming</th>
+              <th>Retry upload</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -129,7 +96,7 @@
   </main>
 
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="/static/drive-sync.js?v=account-20260503-1"></script>
-  <script src="/static/app.js?v=account-20260503-1"></script>
+  <script src="/static/drive-sync.js?v=progress-20260512-1"></script>
+  <script src="/static/app.js?v=progress-20260512-1"></script>
 </body>
 </html>

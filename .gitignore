@@ -11,5 +11,8 @@ config.yaml
 .uv-cache/
 .deploy_vercel/
 .vercel/
+.state/
+.history/
+.lh/
 screenshots/
 .DS_Store

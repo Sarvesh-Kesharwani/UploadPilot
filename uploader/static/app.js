@@ -4,11 +4,26 @@ const summary = $("#summary");
 const startBtn = $("#start");
 const setupCard = document.querySelector(".form-card");
 const driveStatus = $("#drive-status");
-const restoreStatus = $("#restore-status");
+const restoreBtn = $("#restore-yesterday");
+const googleSigninBtn = $("#google-signin");
+const googleSignoutBtn = $("#google-signout");
 const clearLastBatchBtn = $("#clear-last-batch");
 const LAST_BATCH_KEY = "uploadpilot_last_batch";
 const ls = window.localStorage;
 let lastBatchSerialized = ls.getItem(LAST_BATCH_KEY) || "";
+let historyCache = null;
+const LOCAL_API_BASE = "http://127.0.0.1:3000";
+const USE_LOCAL_API = !["127.0.0.1", "localhost"].includes(window.location.hostname);
+const API_BASE = USE_LOCAL_API ? LOCAL_API_BASE : "";
+
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
+function localServerError(err) {
+  if (!USE_LOCAL_API) return err.message;
+  return `${err.message}\n\nOpen the local UploadPilot server first: ${LOCAL_API_BASE}\nThe hosted Vercel page cannot read folders from your D: drive directly.`;
+}
 
 const statusLabels = {
   queued: "in queue",
@@ -44,29 +59,115 @@ function renderState(s) {
   startBtn.disabled = !job.finished_at;
   startBtn.textContent = job.finished_at ? "Start upload" : "Uploading...";
 
-  renderBatchRows(job);
+  renderBatchRows(job, !job.finished_at);
 }
 
-function renderBatchRows(job) {
+function renderBatchRows(job, isLiveJob = false) {
   tbody.innerHTML = job.items.map((it, i) => `
     <tr>
       <td>${i + 1}</td>
       <td class="path-cell">${escape(it.path || it.name)}</td>
-      <td>${escape(it.display_title || "")}</td>
+      <td class="title-cell">${escape(targetTitle(it))}</td>
+      <td class="title-cell">${escape(youlearnAiName(it))}</td>
+      <td class="title-cell">${escape(currentTitle(it))}</td>
+      <td>${progressBar(it)}</td>
       <td><span class="badge ${it.status}">${statusLabels[it.status] || it.status}</span></td>
       <td class="muted">${escape(it.error || "")}</td>
       <td>${retryButton(job, it, i)}</td>
+      <td>${retryNamingButton(it, i)}</td>
+      <td>${retryUploadButton(it, i, isLiveJob)}</td>
     </tr>`).join("");
   document.querySelectorAll("[data-retry-rename]").forEach((button) => {
     button.addEventListener("click", () => retryRename(Number(button.dataset.retryRename)));
   });
+  document.querySelectorAll("[data-retry-upload]").forEach((button) => {
+    button.addEventListener("click", () => retryUpload(Number(button.dataset.retryUpload)));
+  });
 }
 
 function retryButton(job, item, index) {
-  if (item.status !== "failed" || !item.display_title) return "";
-  const title = item.name || "";
-  if ((item.display_title || "").trim().toLowerCase() === title.trim().toLowerCase()) return "";
+  if (!canContinueRename(item)) return "";
   return `<button class="retry-btn" data-retry-rename="${index}">Continue rename</button>`;
+}
+
+function retryNamingButton(item, index) {
+  if (!canRetryNaming(item)) return "";
+  return `<button class="retry-btn" data-retry-rename="${index}">Retry naming</button>`;
+}
+
+function retryUploadButton(item, index, isLiveJob) {
+  if (!canRetryUpload(item, isLiveJob)) return "";
+  return `<button class="retry-btn" data-retry-upload="${index}">Retry upload</button>`;
+}
+
+function targetTitle(item) {
+  return item.target_title || item.name || "";
+}
+
+function currentTitle(item) {
+  return item.current_title || item.display_title || "";
+}
+
+function youlearnAiName(item) {
+  const stored = item.youlearn_ai_name || "";
+  if (stored) return stored;
+  const current = currentTitle(item);
+  const target = targetTitle(item);
+  if (!current || !target) return "";
+  return current.trim().toLowerCase() === target.trim().toLowerCase() ? "" : current;
+}
+
+function progressInfo(item) {
+  const statusProgress = {
+    queued: 0,
+    uploading: 25,
+    settling: 55,
+    renaming: 75,
+    validating: 90,
+    uploaded: 100,
+    skipped: 100,
+    failed: Number(item.progress_percent || 0),
+  };
+  const raw = Number(item.progress_percent ?? statusProgress[item.status] ?? 0);
+  const percent = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 0));
+  const label = item.status === "failed"
+    ? `${percent}% failed`
+    : `${percent}% ${statusLabels[item.status] || item.status || "pending"}`;
+  return { percent, label };
+}
+
+function progressBar(item) {
+  const { percent, label } = progressInfo(item);
+  const active = ["uploading", "settling", "renaming", "validating"].includes(item.status) ? " active" : "";
+  const failed = item.status === "failed" ? " failed" : "";
+  return `<div class="progress-cell" title="${escape(label)}">
+    <div class="video-progress${active}${failed}" aria-label="${escape(label)}">
+      <span style="width:${percent}%"></span>
+    </div>
+    <small>${escape(label)}</small>
+  </div>`;
+}
+
+function canContinueRename(item) {
+  const target = targetTitle(item).trim().toLowerCase();
+  const current = currentTitle(item).trim().toLowerCase();
+  if (!target) return false;
+  if (current && current === target) return false;
+  if (["queued", "uploading", "uploaded", "skipped"].includes(item.status)) return false;
+  return Boolean(current || item.content_url);
+}
+
+function canRetryNaming(item) {
+  if (!targetTitle(item).trim()) return false;
+  if (["queued", "uploading"].includes(item.status)) return false;
+  return Boolean(item.content_url || currentTitle(item) || youlearnAiName(item));
+}
+
+function canRetryUpload(item, isLiveJob) {
+  if (!targetTitle(item).trim()) return false;
+  if (!item.path) return false;
+  if (isLiveJob && ["queued", "uploading", "settling", "renaming", "validating"].includes(item.status)) return false;
+  return true;
 }
 
 function persistLastBatch(job) {
@@ -106,7 +207,7 @@ function setLastBatch(batch) {
 }
 
 function renderLastBatch() {
-  const batch = getLastBatch();
+  const batch = getLastBatch() || historyCache?.last_batch;
   if (!batch) {
     summary.textContent = "idle";
     tbody.innerHTML = "";
@@ -128,7 +229,7 @@ function escape(s) {
   }[c]));
 }
 
-const es = new EventSource("/api/events");
+const es = new EventSource(apiUrl("/api/events"));
 es.onmessage = (e) => {
   try {
     renderState(JSON.parse(e.data));
@@ -140,12 +241,32 @@ es.onerror = () => {
 
 async function refreshState() {
   try {
-    const r = await fetch("/api/state", { cache: "no-store" });
+    const r = await fetch(apiUrl("/api/state"), { cache: "no-store" });
     if (r.ok) renderState(await r.json());
   } catch {}
 }
 setInterval(refreshState, 2000);
-refreshState();
+refreshHistory().then(refreshState);
+
+async function refreshHistory() {
+  try {
+    const r = await fetch(apiUrl("/api/history"), { cache: "no-store" });
+    if (r.ok) {
+      historyCache = await r.json();
+      renderLastBatch();
+    }
+  } catch {}
+}
+
+async function importHistory(data) {
+  const r = await fetch(apiUrl("/api/history/import"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 
 $("#space").value = ls.getItem("space") || "";
 $("#folder").value = ls.getItem("folder") || "";
@@ -159,6 +280,7 @@ function getAppData() {
     folder: $("#folder").value.trim(),
     upload_mode: document.querySelector('input[name="mode"]:checked')?.value || "sequential",
     last_batch: getLastBatch(),
+    upload_history: historyCache,
   };
 }
 
@@ -188,6 +310,13 @@ function applyAppData(data) {
       renderLastBatch();
     }
   }
+  if (data.upload_history) {
+    historyCache = data.upload_history;
+    importHistory(data).then((merged) => {
+      historyCache = merged;
+      renderLastBatch();
+    }).catch(() => {});
+  }
 }
 
 function setEditBlocked(blocked) {
@@ -200,19 +329,26 @@ function setEditBlocked(blocked) {
 }
 
 function setDriveStatus(info) {
+  const signedIn = Boolean(info.signedIn);
+  driveStatus.classList.toggle("hidden", true);
+  driveStatus.textContent = "";
+  driveStatus.classList.toggle("error", false);
+  googleSigninBtn.classList.toggle("hidden", signedIn);
+  googleSignoutBtn.classList.toggle("hidden", !signedIn);
+  restoreBtn.disabled = !signedIn;
+  restoreBtn.title = signedIn ? "Check and restore yesterday's Drive backup" : "Sign in with Google Drive first";
   if (info.error) {
-    driveStatus.textContent = info.error;
-    driveStatus.classList.add("error");
+    restoreBtn.title = info.error;
     return;
   }
-  driveStatus.classList.remove("error");
   const name = info.profile?.name || info.profile?.email || "";
-  driveStatus.textContent = info.signedIn ? `Drive signed in${name ? `: ${name}` : ""}` : (info.message || "Drive signed out");
-  if (info.signedIn) refreshRestoreInfo();
+  googleSignoutBtn.title = signedIn && name ? `Signed in as ${name}` : "";
+  if (signedIn) refreshRestoreInfo();
 }
 
 async function initDriveSync() {
-  const config = await fetch("/api/config", { cache: "no-store" }).then((r) => r.json());
+  const config = await fetch(apiUrl("/api/config"), { cache: "no-store" }).then((r) => r.json());
+  config.apiBase = API_BASE;
   window.UploadPilotDrive.init({
     config,
     getData: getAppData,
@@ -242,11 +378,17 @@ $("#preview").onclick = async () => {
   saveLocalForm();
   const out = $("#preview-out");
   out.textContent = "scanning...";
-  const r = await fetch("/api/preview", {
+  let r;
+  try {
+    r = await fetch(apiUrl("/api/preview"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ folder }),
-  });
+    });
+  } catch (err) {
+    out.textContent = "error: " + localServerError(err);
+    return;
+  }
   if (!r.ok) {
     out.textContent = "error: " + await r.text();
     return;
@@ -264,11 +406,19 @@ startBtn.onclick = async () => {
   $("#preview-out").innerHTML = "";
   startBtn.disabled = true;
   startBtn.textContent = "Uploading...";
-  const r = await fetch("/api/start", {
+  let r;
+  try {
+    r = await fetch(apiUrl("/api/start"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ space_url, folder, mode }),
-  });
+    });
+  } catch (err) {
+    startBtn.disabled = false;
+    startBtn.textContent = "Start upload";
+    alert("start failed: " + localServerError(err));
+    return;
+  }
   if (!r.ok) {
     startBtn.disabled = false;
     startBtn.textContent = "Start upload";
@@ -280,38 +430,59 @@ startBtn.onclick = async () => {
 };
 
 $("#cancel").onclick = async () => {
-  await fetch("/api/cancel", { method: "POST" });
+  await fetch(apiUrl("/api/cancel"), { method: "POST" });
 };
 
 clearLastBatchBtn.onclick = () => {
   if (!confirm("Clear the saved last batch from this app and Drive sync data?")) return;
   ls.removeItem(LAST_BATCH_KEY);
   lastBatchSerialized = "";
+  if (historyCache) historyCache.last_batch = null;
   renderLastBatch();
+  fetch(apiUrl("/api/history/clear-last-batch"), { method: "POST" })
+    .then((r) => r.ok ? r.json() : null)
+    .then((data) => { if (data) historyCache = data; })
+    .catch(() => {});
   window.UploadPilotDrive?.scheduleSave();
 };
 
 async function retryRename(index) {
-  const batch = getLastBatch();
+  const batch = getLastBatch() || historyCache?.last_batch;
   const item = batch?.items?.[index];
   if (!batch || !item) return;
   try {
     item.status = "renaming";
+    item.progress_percent = 75;
     item.error = "";
+    item.rename_started_at = new Date().toISOString();
     setLastBatch(batch);
-    const r = await fetch("/api/rename", {
+    const r = await fetch(apiUrl("/api/rename"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         space_url: batch.space_url,
-        display_title: item.display_title,
-        target_title: item.name,
+        display_title: currentTitle(item),
+        target_title: targetTitle(item),
+        youlearn_ai_name: youlearnAiName(item),
         content_url: item.content_url || "",
+        record_id: item.record_id || `${batch.id || ""}:${index}`,
+        job_id: batch.id || "",
+        item_index: index,
+        source_path: item.path || "",
+        folder: batch.folder || "",
+        mode: batch.mode || "",
       }),
     });
-    if (!r.ok) throw new Error(await r.text());
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(result.error || JSON.stringify(result) || r.statusText);
     item.status = "uploaded";
-    item.display_title = item.name;
+    item.progress_percent = 100;
+    item.resume_checked_title = result.current_title || currentTitle(item);
+    item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
+    item.display_title = targetTitle(item);
+    item.current_title = targetTitle(item);
+    item.renamed_at = new Date().toISOString();
+    item.validated_at = item.renamed_at;
     item.error = "";
   } catch (err) {
     item.status = "failed";
@@ -319,12 +490,65 @@ async function retryRename(index) {
   }
   batch.finished_at = Date.now() / 1000;
   setLastBatch(batch);
+  await refreshHistory();
   window.UploadPilotDrive?.scheduleSave();
 }
 
-$("#google-signin").onclick = () => window.UploadPilotDrive.signIn();
-$("#google-signout").onclick = () => window.UploadPilotDrive.signOut();
-$("#restore-yesterday").onclick = async () => {
+async function retryUpload(index) {
+  const batch = getLastBatch() || historyCache?.last_batch;
+  const item = batch?.items?.[index];
+  if (!batch || !item) return;
+  try {
+    item.status = "uploading";
+    item.progress_percent = 25;
+    item.error = "";
+    item.upload_started_at = new Date().toISOString();
+    setLastBatch(batch);
+    const r = await fetch(apiUrl("/api/reupload"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space_url: batch.space_url,
+        source_path: item.path || "",
+        target_title: targetTitle(item),
+        display_title: currentTitle(item),
+        youlearn_ai_name: youlearnAiName(item),
+        content_url: item.content_url || "",
+        record_id: item.record_id || `${batch.id || ""}:${index}`,
+        job_id: batch.id || "",
+        item_index: index,
+        folder: batch.folder || "",
+        mode: batch.mode || "",
+      }),
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(result.error || JSON.stringify(result) || r.statusText);
+    const doneAt = new Date().toISOString();
+    item.status = "uploaded";
+    item.progress_percent = 100;
+    item.resume_checked_title = result.current_title || currentTitle(item);
+    item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
+    item.content_url = result.content_url || item.content_url || "";
+    item.display_title = targetTitle(item);
+    item.current_title = targetTitle(item);
+    item.uploaded_at = doneAt;
+    item.renamed_at = doneAt;
+    item.validated_at = doneAt;
+    item.error = "";
+  } catch (err) {
+    item.status = "failed";
+    item.error = err.message;
+  }
+  batch.finished_at = Date.now() / 1000;
+  setLastBatch(batch);
+  await refreshHistory();
+  window.UploadPilotDrive?.scheduleSave();
+}
+
+googleSigninBtn.onclick = () => window.UploadPilotDrive.signIn();
+googleSignoutBtn.onclick = () => window.UploadPilotDrive.signOut();
+restoreBtn.disabled = true;
+restoreBtn.onclick = async () => {
   if (!confirm("Restore yesterday's Drive backup? Current Drive state will be snapshotted first.")) return;
   try {
     const result = await window.UploadPilotDrive.restore();
@@ -339,11 +563,11 @@ $("#restore-yesterday").onclick = async () => {
 async function refreshRestoreInfo() {
   try {
     const info = await window.UploadPilotDrive.fetchRestoreInfo();
-    restoreStatus.textContent = info.hasYesterdayBackup
+    restoreBtn.title = info.hasYesterdayBackup
       ? `Yesterday backup available (${info.defaultDate}).`
       : `No yesterday backup found (${info.defaultDate}).`;
   } catch (err) {
-    restoreStatus.textContent = err.message;
+    restoreBtn.title = err.message;
   }
 }
 

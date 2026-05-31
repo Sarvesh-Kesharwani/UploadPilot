@@ -3,6 +3,10 @@
 .tmp
 .uv-cache
 .venv
+.state
+.history
+.lh
+screenshots
 __pycache__
 *.pyc
 config.yaml

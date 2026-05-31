@@ -562,6 +562,14 @@ class YouLearn:
         p.wait_for_timeout(1200)
         return self._ensure_header_title(new_title)
 
+    def current_title_for_content_url(self, content_url: str) -> str:
+        if not content_url:
+            return ""
+        p = self.page()
+        p.goto(content_url, wait_until="domcontentloaded")
+        p.wait_for_timeout(1200)
+        return self._current_content_title() or ""
+
     def rename_video_at_list_index(self, space_url: str, row_index: int, new_title: str) -> str:
         """
         Rename by visible row position. Smart mode uses this after batch upload
@@ -951,6 +959,17 @@ class YouLearn:
             if _visible_title_can_be_target(existing, title):
                 return existing
         return None
+
+    def find_resume_candidate(self, current_title: str, target_title: str) -> str | None:
+        titles = self.list_video_titles()
+        current_key = _normalize_title(current_title)
+        for existing in titles:
+            if current_key and _normalize_title(existing) == current_key:
+                return existing
+        for existing in titles:
+            if _visible_title_can_be_target(existing, target_title):
+                return existing
+        return titles[0] if titles and not current_title else current_title or None
 
     def wait_for_title_in_space(self, space_url: str, title: str, timeout_s: float = 120.0) -> None:
         deadline = time.monotonic() + timeout_s

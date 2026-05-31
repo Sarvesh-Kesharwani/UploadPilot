@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -12,19 +13,40 @@ from pydantic import BaseModel
 from . import config as cfg_mod
 from .browser import BrowserManager
 from .drive_restore import bearer_token, list_backups, restore_backup
+from .history import UploadHistoryStore
 from .jobs import JobStore
 from .worker import UploadWorker, scan_folder
 
 log = logging.getLogger(__name__)
 
 cfg = cfg_mod.load()
-store = JobStore()
+history = UploadHistoryStore()
+store = JobStore(on_change=history.record_job)
 browser = BrowserManager(cfg.profile_path, cfg.browser.headless, cfg.browser.slow_mo_ms)
 worker = UploadWorker(cfg, store, browser)
 
 app = FastAPI(title="UploadPilot", version="0.1")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "https://uploadpilot.vercel.app",
+        "https://up-uploader.vercel.app",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 STATIC = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+
+@app.middleware("http")
+async def private_network_access_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
 
 
 class StartReq(BaseModel):
@@ -45,7 +67,32 @@ class RetryRenameReq(BaseModel):
     space_url: str
     display_title: str
     target_title: str
+    youlearn_ai_name: str = ""
     content_url: str = ""
+    record_id: str = ""
+    job_id: str = ""
+    item_index: int | None = None
+    source_path: str = ""
+    folder: str = ""
+    mode: str = ""
+
+
+class RetryUploadReq(BaseModel):
+    space_url: str
+    source_path: str
+    target_title: str
+    display_title: str = ""
+    youlearn_ai_name: str = ""
+    content_url: str = ""
+    record_id: str = ""
+    job_id: str = ""
+    item_index: int | None = None
+    folder: str = ""
+    mode: str = ""
+
+
+class HistoryImportReq(BaseModel):
+    data: dict
 
 
 @app.get("/")
@@ -67,6 +114,11 @@ def app_config():
 @app.get("/api/state")
 def state():
     return store.snapshot()
+
+
+@app.get("/api/history")
+def upload_history():
+    return history.snapshot()
 
 
 @app.post("/api/preview")
@@ -100,17 +152,65 @@ def cancel():
 @app.post("/api/rename")
 def retry_rename(req: RetryRenameReq):
     try:
-        worker.retry_rename(
+        result = worker.retry_rename(
             req.space_url.strip(),
             req.display_title.strip(),
             req.target_title.strip(),
             req.content_url.strip(),
         )
+        history.record_rename_attempt(req.model_dump(), result)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True}
+    except Exception as e:
+        result = {
+            "ok": False,
+            "current_title": req.display_title.strip(),
+            "target_title": req.target_title.strip(),
+            "youlearn_ai_name": req.youlearn_ai_name.strip(),
+            "error": str(e),
+        }
+        history.record_rename_attempt(req.model_dump(), result)
+        raise HTTPException(500, str(e))
+    return result
+
+
+@app.post("/api/reupload")
+def retry_upload(req: RetryUploadReq):
+    try:
+        result = worker.retry_upload(
+            req.space_url.strip(),
+            req.source_path.strip(),
+            req.target_title.strip(),
+        )
+        history.record_upload_attempt(req.model_dump(), result)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        result = {
+            "ok": False,
+            "current_title": req.display_title.strip(),
+            "target_title": req.target_title.strip(),
+            "youlearn_ai_name": req.youlearn_ai_name.strip(),
+            "content_url": req.content_url.strip(),
+            "error": str(e),
+        }
+        history.record_upload_attempt(req.model_dump(), result)
+        raise HTTPException(500, str(e))
+    return result
+
+
+@app.post("/api/history/import")
+def import_history(req: HistoryImportReq):
+    return history.merge_client_data(req.data)
+
+
+@app.post("/api/history/clear-last-batch")
+def clear_history_last_batch():
+    return history.clear_last_batch()
 
 
 @app.get("/api/drive/restore")
