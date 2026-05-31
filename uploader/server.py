@@ -95,6 +95,11 @@ class RetryUploadReq(BaseModel):
     mode: str = ""
 
 
+class BatchRetryReq(BaseModel):
+    space_url: str
+    items: list[RetryRenameReq]
+
+
 class HistoryImportReq(BaseModel):
     data: dict
 
@@ -123,7 +128,6 @@ def state():
 @app.get("/api/history")
 def upload_history():
     return history.snapshot()
-
 
 
 @app.post("/api/folder/pick")
@@ -172,57 +176,86 @@ def cancel():
 
 
 @app.post("/api/rename")
-def retry_rename(req: RetryRenameReq):
+async def retry_rename(req: RetryRenameReq):
+    loop = asyncio.get_event_loop()
     try:
-        result = worker.retry_rename(
+        result = await loop.run_in_executor(None, _do_rename, req)
+        history.record_rename_attempt(req.model_dump(), result)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return result
+
+
+def _do_rename(req: RetryRenameReq) -> dict:
+    try:
+        return worker.retry_rename(
             req.space_url.strip(),
             req.display_title.strip(),
             req.target_title.strip(),
             req.content_url.strip(),
         )
-        history.record_rename_attempt(req.model_dump(), result)
+    except RuntimeError:
+        raise
+    except ValueError:
+        raise
+
+
+@app.post("/api/reupload")
+async def retry_upload(req: RetryUploadReq):
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, _do_reupload, req)
+        history.record_upload_attempt(req.model_dump(), result)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        result = {
-            "ok": False,
-            "current_title": req.display_title.strip(),
-            "target_title": req.target_title.strip(),
-            "youlearn_ai_name": req.youlearn_ai_name.strip(),
-            "error": str(e),
-        }
-        history.record_rename_attempt(req.model_dump(), result)
         raise HTTPException(500, str(e))
     return result
 
 
-@app.post("/api/reupload")
-def retry_upload(req: RetryUploadReq):
+def _do_reupload(req: RetryUploadReq) -> dict:
     try:
-        result = worker.retry_upload(
+        return worker.retry_upload(
             req.space_url.strip(),
             req.source_path.strip(),
             req.target_title.strip(),
         )
-        history.record_upload_attempt(req.model_dump(), result)
+    except RuntimeError:
+        raise
+    except ValueError:
+        raise
+
+
+@app.post("/api/rename/batch")
+async def batch_rename(req: BatchRetryReq):
+    if not req.items:
+        raise HTTPException(400, "No items provided")
+    if store.current() and store.current().finished_at is None:
+        raise HTTPException(409, "A job is already running")
+
+    space_url = req.space_url.strip()
+
+    def _run_batch():
+        return worker.rename_batch(space_url, [it.model_dump() for it in req.items])
+
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(None, _run_batch)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
     except Exception as e:
-        result = {
-            "ok": False,
-            "current_title": req.display_title.strip(),
-            "target_title": req.target_title.strip(),
-            "youlearn_ai_name": req.youlearn_ai_name.strip(),
-            "content_url": req.content_url.strip(),
-            "error": str(e),
-        }
-        history.record_upload_attempt(req.model_dump(), result)
         raise HTTPException(500, str(e))
-    return result
+
+    for idx, result in enumerate(results):
+        history.record_rename_attempt(req.items[idx].model_dump(), result)
+
+    return {"results": results}
 
 
 @app.post("/api/history/import")
@@ -254,7 +287,6 @@ async def events(request: Request):
 
     async def gen():
         try:
-            # initial snapshot
             yield f"data: {json.dumps(store.snapshot())}\n\n"
             while True:
                 if await request.is_disconnected():
@@ -263,7 +295,6 @@ async def events(request: Request):
                     item = await loop.run_in_executor(None, q.get, True, 15)
                     yield f"data: {json.dumps(item)}\n\n"
                 except Exception:
-                    # keep-alive ping
                     yield ": ping\n\n"
         finally:
             store.unsubscribe(q)

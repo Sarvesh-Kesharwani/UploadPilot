@@ -25,8 +25,6 @@ def _is_browser_closed_error(exc: Exception) -> bool:
 
 
 def _title_matches(display: str, target: str, extensions: list[str]) -> bool:
-    # Exact match only. YouLearn may visually trim the extension but still
-    # store the full filename — always force rename unless truly identical.
     return (display or "").strip().casefold() == (target or "").strip().casefold()
 
 
@@ -107,7 +105,6 @@ class UploadWorker:
                 self._run_sequential(space_url, yl, job.items)
         except Exception as e:
             log.exception("job fatal")
-            # Mark all non-terminal as failed.
             def m(job):
                 for it in job.items:
                     if it.status in (Status.QUEUED, Status.UPLOADING, Status.SETTLING, Status.RENAMING, Status.VALIDATING):
@@ -247,6 +244,86 @@ class UploadWorker:
             }
         finally:
             self.browser.shutdown()
+
+    def rename_batch(self, space_url: str, items: list[dict]) -> list[dict]:
+        """Rename multiple videos in a single browser session."""
+        if self.store.current() and self.store.current().finished_at is None:
+            raise RuntimeError("A job is already running")
+
+        yl = self._youlearn()
+        results: list[dict] = []
+        try:
+            yl.ensure_logged_in(self.cfg.auth.email, self.cfg.auth.password)
+            yl.open_space(space_url, force_reload=True)
+
+            for item in items:
+                display_title: str = item.get("display_title", "")
+                target_title: str = item.get("target_title", "")
+                content_url: str = item.get("content_url", "")
+                current_title = display_title
+
+                try:
+                    if content_url:
+                        current_title = yl.current_title_for_content_url(content_url) or current_title
+                        if _title_matches(current_title, target_title, self.cfg.uploads.extensions):
+                            results.append({
+                                "ok": True, "current_title": target_title, "target_title": target_title,
+                                "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                            })
+                            continue
+                        if yl.rename_content_url(content_url, target_title):
+                            yl.wait_for_title_in_space(space_url, target_title)
+                            results.append({
+                                "ok": True, "current_title": current_title, "target_title": target_title,
+                                "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                            })
+                            continue
+                        yl.open_space(space_url, force_reload=True)
+
+                    if yl.has_title(target_title):
+                        results.append({
+                            "ok": True, "current_title": target_title, "target_title": target_title,
+                            "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                        })
+                        continue
+
+                    candidate = yl.find_resume_candidate(current_title, target_title)
+                    if candidate:
+                        current_title = candidate
+
+                    if yl.has_title(target_title):
+                        results.append({
+                            "ok": True, "current_title": target_title, "target_title": target_title,
+                            "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                        })
+                        continue
+
+                    try:
+                        yl.rename_top_video(current_title, target_title)
+                    except Exception:
+                        fallback_title = Path(target_title).stem
+                        if _title_matches(current_title, fallback_title, self.cfg.uploads.extensions):
+                            raise
+                        yl.open_space(space_url, force_reload=True)
+                        yl.rename_top_video(fallback_title, target_title)
+                        current_title = fallback_title
+
+                    yl.wait_for_title_in_space(space_url, target_title)
+                    results.append({
+                        "ok": True, "current_title": current_title, "target_title": target_title,
+                        "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                    })
+                except Exception as e:
+                    log.exception("batch rename failed for %s", target_title)
+                    results.append({
+                        "ok": False, "current_title": current_title, "target_title": target_title,
+                        "youlearn_ai_name": _youlearn_ai_name(display_title, target_title),
+                        "error": str(e),
+                    })
+        finally:
+            self.browser.shutdown()
+
+        return results
 
     def continue_rename_item(self, space_url: str, display_title: str, target_title: str, content_url: str = "") -> dict:
         try:

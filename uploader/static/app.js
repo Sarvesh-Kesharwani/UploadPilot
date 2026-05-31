@@ -4,12 +4,12 @@ const summary = $("#summary");
 const startBtn = $("#start");
 const setupCard = document.querySelector(".form-card");
 const driveStatus = $("#drive-status");
-const openSpaceBtn = $("#open-space");
-const pickFolderBtn = $("#pick-folder");
 const restoreBtn = $("#restore-yesterday");
 const googleSigninBtn = $("#google-signin");
 const googleSignoutBtn = $("#google-signout");
 const clearLastBatchBtn = $("#clear-last-batch");
+const openSpaceBtn = $("#open-space");
+const pickFolderBtn = $("#pick-folder");
 const LAST_BATCH_KEY = "uploadpilot_last_batch";
 const ls = window.localStorage;
 let lastBatchSerialized = ls.getItem(LAST_BATCH_KEY) || "";
@@ -79,8 +79,8 @@ function renderBatchRows(job, isLiveJob = false) {
       <td>${retryNamingButton(it, i)}</td>
       <td>${retryUploadButton(it, i, isLiveJob)}</td>
     </tr>`).join("");
-  document.querySelectorAll("[data-retry-rename]").forEach((button) => {
-    button.addEventListener("click", () => retryRename(Number(button.dataset.retryRename)));
+  document.querySelectorAll("[data-batch-rename]").forEach((button) => {
+    button.addEventListener("click", () => batchRename());
   });
   document.querySelectorAll("[data-retry-upload]").forEach((button) => {
     button.addEventListener("click", () => retryUpload(Number(button.dataset.retryUpload)));
@@ -89,12 +89,12 @@ function renderBatchRows(job, isLiveJob = false) {
 
 function retryButton(job, item, index) {
   if (!canContinueRename(item)) return "";
-  return `<button class="retry-btn" data-retry-rename="${index}">Continue rename</button>`;
+  return `<button class="retry-btn" data-batch-rename="${index}">Continue rename</button>`;
 }
 
 function retryNamingButton(item, index) {
   if (!canRetryNaming(item)) return "";
-  return `<button class="retry-btn" data-retry-rename="${index}">Retry naming</button>`;
+  return `<button class="retry-btn" data-batch-rename="${index}">Retry naming</button>`;
 }
 
 function retryUploadButton(item, index, isLiveJob) {
@@ -238,7 +238,6 @@ es.onmessage = (e) => {
   } catch {}
 };
 es.onerror = () => {
-  // Browser reconnects automatically.
 };
 
 async function refreshState() {
@@ -449,48 +448,74 @@ clearLastBatchBtn.onclick = () => {
   window.UploadPilotDrive?.scheduleSave();
 };
 
-async function retryRename(index) {
+async function batchRename() {
   const batch = getLastBatch() || historyCache?.last_batch;
-  const item = batch?.items?.[index];
-  if (!batch || !item) return;
+  if (!batch) return;
+
+  const pendingItems = [];
+  batch.items.forEach((item, i) => {
+    if (canRetryNaming(item) || canContinueRename(item)) {
+      item.status = "renaming";
+      item.progress_percent = 75;
+      item.error = "";
+      item.rename_started_at = new Date().toISOString();
+      pendingItems.push({ item, index: i });
+    }
+  });
+
+  if (pendingItems.length === 0) return;
+  if (!confirm(`Rename ${pendingItems.length} video(s) in one session?`)) return;
+
+  setLastBatch(batch);
+
+  const bodyItems = pendingItems.map(({ item }) => ({
+    space_url: batch.space_url,
+    display_title: currentTitle(item),
+    target_title: targetTitle(item),
+    youlearn_ai_name: youlearnAiName(item),
+    content_url: item.content_url || "",
+    record_id: item.record_id || `${batch.id || ""}:${item._idx ?? 0}`,
+    job_id: batch.id || "",
+    source_path: item.path || "",
+    folder: batch.folder || "",
+    mode: batch.mode || "",
+  }));
+
   try {
-    item.status = "renaming";
-    item.progress_percent = 75;
-    item.error = "";
-    item.rename_started_at = new Date().toISOString();
-    setLastBatch(batch);
-    const r = await fetch(apiUrl("/api/rename"), {
+    const r = await fetch(apiUrl("/api/rename/batch"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        space_url: batch.space_url,
-        display_title: currentTitle(item),
-        target_title: targetTitle(item),
-        youlearn_ai_name: youlearnAiName(item),
-        content_url: item.content_url || "",
-        record_id: item.record_id || `${batch.id || ""}:${index}`,
-        job_id: batch.id || "",
-        item_index: index,
-        source_path: item.path || "",
-        folder: batch.folder || "",
-        mode: batch.mode || "",
-      }),
+      body: JSON.stringify({ space_url: batch.space_url, items: bodyItems }),
     });
-    const result = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(result.error || JSON.stringify(result) || r.statusText);
-    item.status = "uploaded";
-    item.progress_percent = 100;
-    item.resume_checked_title = result.current_title || currentTitle(item);
-    item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
-    item.display_title = targetTitle(item);
-    item.current_title = targetTitle(item);
-    item.renamed_at = new Date().toISOString();
-    item.validated_at = item.renamed_at;
-    item.error = "";
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ error: r.statusText }));
+      throw new Error(err.error || err.detail || JSON.stringify(err));
+    }
+    const data = await r.json();
+    data.results.forEach((result, i) => {
+      const { item } = pendingItems[i];
+      if (result.ok) {
+        item.status = "uploaded";
+        item.progress_percent = 100;
+        item.resume_checked_title = result.current_title || currentTitle(item);
+        item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
+        item.display_title = targetTitle(item);
+        item.current_title = result.already_done ? (result.current_title || targetTitle(item)) : targetTitle(item);
+        item.renamed_at = new Date().toISOString();
+        item.validated_at = item.renamed_at;
+        item.error = "";
+      } else {
+        item.status = "failed";
+        item.error = result.error || "Batch rename failed";
+      }
+    });
   } catch (err) {
-    item.status = "failed";
-    item.error = err.message;
+    pendingItems.forEach(({ item }) => {
+      item.status = "failed";
+      item.error = err.message;
+    });
   }
+
   batch.finished_at = Date.now() / 1000;
   setLastBatch(batch);
   await refreshHistory();
@@ -548,35 +573,6 @@ async function retryUpload(index) {
   window.UploadPilotDrive?.scheduleSave();
 }
 
-googleSigninBtn.onclick = () => window.UploadPilotDrive.signIn();
-googleSignoutBtn.onclick = () => window.UploadPilotDrive.signOut();
-restoreBtn.disabled = true;
-restoreBtn.onclick = async () => {
-  if (!confirm("Restore yesterday's Drive backup? Current Drive state will be snapshotted first.")) return;
-  try {
-    const result = await window.UploadPilotDrive.restore();
-    const counts = result.counts ? ` ${JSON.stringify(result.counts)}` : "";
-    alert(`Restored ${result.date}.${counts}`);
-    location.reload();
-  } catch (err) {
-    alert(err.message);
-  }
-};
-
-async function refreshRestoreInfo() {
-  try {
-    const info = await window.UploadPilotDrive.fetchRestoreInfo();
-    restoreBtn.title = info.hasYesterdayBackup
-      ? `Yesterday backup available (${info.defaultDate}).`
-      : `No yesterday backup found (${info.defaultDate}).`;
-  } catch (err) {
-    restoreBtn.title = err.message;
-  }
-}
-
-initDriveSync().catch((err) => {
-  driveStatus.textContent = err.message;
-});
 openSpaceBtn.onclick = () => {
   const url = $("#space").value.trim();
   if (url) window.open(url, "_blank", "noreferrer");
@@ -618,3 +614,32 @@ pickFolderBtn.onclick = async () => {
   });
 });
 
+googleSigninBtn.onclick = () => window.UploadPilotDrive.signIn();
+googleSignoutBtn.onclick = () => window.UploadPilotDrive.signOut();
+restoreBtn.disabled = true;
+restoreBtn.onclick = async () => {
+  if (!confirm("Restore yesterday's Drive backup? Current Drive state will be snapshotted first.")) return;
+  try {
+    const result = await window.UploadPilotDrive.restore();
+    const counts = result.counts ? ` ${JSON.stringify(result.counts)}` : "";
+    alert(`Restored ${result.date}.${counts}`);
+    location.reload();
+  } catch (err) {
+    alert(err.message);
+  }
+};
+
+async function refreshRestoreInfo() {
+  try {
+    const info = await window.UploadPilotDrive.fetchRestoreInfo();
+    restoreBtn.title = info.hasYesterdayBackup
+      ? `Yesterday backup available (${info.defaultDate}).`
+      : `No yesterday backup found (${info.defaultDate}).`;
+  } catch (err) {
+    restoreBtn.title = err.message;
+  }
+}
+
+initDriveSync().catch((err) => {
+  driveStatus.textContent = err.message;
+});
