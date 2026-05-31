@@ -95,11 +95,6 @@ class RetryUploadReq(BaseModel):
     mode: str = ""
 
 
-class BatchRetryReq(BaseModel):
-    space_url: str
-    items: list[RetryRenameReq]
-
-
 class HistoryImportReq(BaseModel):
     data: dict
 
@@ -176,32 +171,20 @@ def cancel():
 
 
 @app.post("/api/rename")
-async def retry_rename(req: RetryRenameReq):
-    loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(None, _do_rename, req)
-        history.record_rename_attempt(req.model_dump(), result)
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
-    return result
-
-
-def _do_rename(req: RetryRenameReq) -> dict:
-    try:
-        return worker.retry_rename(
-            req.space_url.strip(),
-            req.display_title.strip(),
-            req.target_title.strip(),
-            req.content_url.strip(),
-        )
-    except RuntimeError:
-        raise
-    except ValueError:
-        raise
+def retry_rename(req: RetryRenameReq):
+    if store.current() and store.current().finished_at is None:
+        raise HTTPException(409, "A job is already running")
+    
+    request_id = req.record_id or f"{req.job_id}:{req.item_index}" if req.item_index is not None else ""
+    rid = worker.rename_queue.enqueue(
+        req.space_url.strip(),
+        req.display_title.strip(),
+        req.target_title.strip(),
+        req.content_url.strip(),
+        request_id,
+    )
+    history.record_rename_attempt(req.model_dump(), {"ok": True, "queued": True, "request_id": rid})
+    return {"ok": True, "queued": True, "request_id": rid, "queue_snapshot": worker.rename_queue.snapshot()}
 
 
 @app.post("/api/reupload")
@@ -232,30 +215,9 @@ def _do_reupload(req: RetryUploadReq) -> dict:
         raise
 
 
-@app.post("/api/rename/batch")
-async def batch_rename(req: BatchRetryReq):
-    if not req.items:
-        raise HTTPException(400, "No items provided")
-    if store.current() and store.current().finished_at is None:
-        raise HTTPException(409, "A job is already running")
-
-    space_url = req.space_url.strip()
-
-    def _run_batch():
-        return worker.rename_batch(space_url, [it.model_dump() for it in req.items])
-
-    loop = asyncio.get_event_loop()
-    try:
-        results = await loop.run_in_executor(None, _run_batch)
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-    for idx, result in enumerate(results):
-        history.record_rename_attempt(req.items[idx].model_dump(), result)
-
-    return {"results": results}
+@app.get("/api/rename/queue")
+def rename_queue_status():
+    return worker.rename_queue.snapshot()
 
 
 @app.post("/api/history/import")

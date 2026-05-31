@@ -1,6 +1,8 @@
 from __future__ import annotations
 import logging
+import queue
 import threading
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -67,12 +69,202 @@ def _queue_name(root: Path, file_path: Path) -> str:
     return rel if "/" not in rel else rel.replace("/", " / ")
 
 
+class RenameQueue:
+    """Dedicated thread that processes renames sequentially in a single browser session."""
+
+    def __init__(self, cfg: Config, browser_factory):
+        self.cfg = cfg
+        self._browser_factory = browser_factory
+        self._qlock = threading.Lock()
+        self._items: list[dict] = []  # [{request_id, space_url, display_title, target_title, content_url, status, result}]
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+
+    def enqueue(self, space_url: str, display_title: str, target_title: str,
+                content_url: str = "", request_id: str = "") -> str:
+        rid = request_id or f"rq-{int(time.time() * 1000)}"
+        item = {
+            "request_id": rid,
+            "space_url": space_url,
+            "display_title": display_title,
+            "target_title": target_title,
+            "content_url": content_url,
+            "status": "queued",
+            "result": None,
+        }
+        with self._qlock:
+            self._items.append(item)
+        self._wake.set()
+        self._ensure_running()
+        return rid
+
+    def enqueue_batch(self, items: list[dict]) -> list[str]:
+        rids = []
+        with self._qlock:
+            for it in items:
+                rid = it.get("request_id") or f"rq-{int(time.time() * 1000)}-{len(rids)}"
+                rids.append(rid)
+                self._items.append({
+                    "request_id": rid,
+                    "space_url": (it.get("space_url") or "").strip(),
+                    "display_title": (it.get("display_title") or "").strip(),
+                    "target_title": (it.get("target_title") or "").strip(),
+                    "content_url": (it.get("content_url") or "").strip(),
+                    "status": "queued",
+                    "result": None,
+                })
+        self._wake.set()
+        self._ensure_running()
+        return rids
+
+    def snapshot(self) -> dict:
+        with self._qlock:
+            return {
+                "items": [dict(it) for it in self._items],
+                "running": self._thread is not None and self._thread.is_alive(),
+            }
+
+    def _ensure_running(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="rename-queue")
+        self._thread.start()
+
+    def _loop(self):
+        log.info("rename queue thread started")
+        browser = None
+        yl: YouLearn | None = None
+
+        try:
+            while not self._stop.is_set():
+                item = None
+                with self._qlock:
+                    for it in self._items:
+                        if it["status"] == "queued":
+                            item = it
+                            item["status"] = "renaming"
+                            break
+
+                if item is None:
+                    # Idle — wait 30s then shut down
+                    self._wake.wait(timeout=30)
+                    self._wake.clear()
+                    with self._qlock:
+                        if not any(it["status"] == "queued" for it in self._items):
+                            break
+                    continue
+
+                # Process one rename
+                try:
+                    if browser is None:
+                        browser = self._browser_factory()
+                        yl = YouLearn(
+                            browser.context(),
+                            self.cfg.youlearn.dashboard_url,
+                            self.cfg.youlearn.login_url,
+                            self.cfg.youlearn.list_poll_interval_s,
+                            self.cfg.youlearn.list_poll_timeout_s,
+                        )
+                        yl.ensure_logged_in(self.cfg.auth.email, self.cfg.auth.password)
+                        yl.open_space(item["space_url"], force_reload=True)
+
+                    result = self._rename_one(yl, item)
+                    item["result"] = result
+                    item["status"] = "done"
+                except Exception as e:
+                    log.exception("rename queue: %s failed", item["request_id"])
+                    item["result"] = {
+                        "ok": False,
+                        "current_title": item["display_title"],
+                        "target_title": item["target_title"],
+                        "youlearn_ai_name": _youlearn_ai_name(item["display_title"], item["target_title"]),
+                        "error": str(e),
+                    }
+                    item["status"] = "failed"
+                    # Browser crash — will relaunch on next item
+                    if _is_browser_closed_error(e):
+                        browser = None
+                        yl = None
+        finally:
+            if browser:
+                try:
+                    browser.shutdown()
+                except Exception:
+                    pass
+            log.info("rename queue thread exiting")
+
+    def _rename_one(self, yl: YouLearn, item: dict) -> dict:
+        space_url = item["space_url"]
+        display_title = item["display_title"]
+        target_title = item["target_title"]
+        content_url = item["content_url"]
+        current_title = display_title
+
+        yl.open_space(space_url, force_reload=True)
+
+        if content_url:
+            current_title = yl.current_title_for_content_url(content_url) or current_title
+            if _title_matches(current_title, target_title, self.cfg.uploads.extensions):
+                return {
+                    "ok": True, "current_title": target_title, "target_title": target_title,
+                    "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                }
+            if yl.rename_content_url(content_url, target_title):
+                yl.wait_for_title_in_space(space_url, target_title)
+                return {
+                    "ok": True, "current_title": current_title, "target_title": target_title,
+                    "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+                }
+            yl.open_space(space_url, force_reload=True)
+
+        if yl.has_title(target_title):
+            return {
+                "ok": True, "current_title": target_title, "target_title": target_title,
+                "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+            }
+
+        candidate = yl.find_resume_candidate(current_title, target_title)
+        if candidate:
+            current_title = candidate
+
+        if yl.has_title(target_title):
+            return {
+                "ok": True, "current_title": target_title, "target_title": target_title,
+                "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+            }
+
+        try:
+            yl.rename_top_video(current_title, target_title)
+        except Exception:
+            fallback_title = Path(target_title).stem
+            if _title_matches(current_title, fallback_title, self.cfg.uploads.extensions):
+                raise
+            yl.open_space(space_url, force_reload=True)
+            yl.rename_top_video(fallback_title, target_title)
+            current_title = fallback_title
+
+        yl.wait_for_title_in_space(space_url, target_title)
+        return {
+            "ok": True, "current_title": current_title, "target_title": target_title,
+            "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
+        }
+
+
 class UploadWorker:
     def __init__(self, cfg: Config, store: JobStore, browser: BrowserManager):
         self.cfg = cfg
         self.store = store
         self.browser = browser
         self._thread: threading.Thread | None = None
+
+        def _make_browser():
+            return BrowserManager(
+                cfg.profile_path, browser.headless, browser.slow_mo_ms
+            )
+
+        self.rename_queue = RenameQueue(cfg, _make_browser)
 
     def run_job(self, space_url: str, folder: str, mode: UploadMode = "sequential") -> None:
         folder_p = Path(folder)
@@ -244,86 +436,6 @@ class UploadWorker:
             }
         finally:
             self.browser.shutdown()
-
-    def rename_batch(self, space_url: str, items: list[dict]) -> list[dict]:
-        """Rename multiple videos in a single browser session."""
-        if self.store.current() and self.store.current().finished_at is None:
-            raise RuntimeError("A job is already running")
-
-        yl = self._youlearn()
-        results: list[dict] = []
-        try:
-            yl.ensure_logged_in(self.cfg.auth.email, self.cfg.auth.password)
-            yl.open_space(space_url, force_reload=True)
-
-            for item in items:
-                display_title: str = item.get("display_title", "")
-                target_title: str = item.get("target_title", "")
-                content_url: str = item.get("content_url", "")
-                current_title = display_title
-
-                try:
-                    if content_url:
-                        current_title = yl.current_title_for_content_url(content_url) or current_title
-                        if _title_matches(current_title, target_title, self.cfg.uploads.extensions):
-                            results.append({
-                                "ok": True, "current_title": target_title, "target_title": target_title,
-                                "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
-                            })
-                            continue
-                        if yl.rename_content_url(content_url, target_title):
-                            yl.wait_for_title_in_space(space_url, target_title)
-                            results.append({
-                                "ok": True, "current_title": current_title, "target_title": target_title,
-                                "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
-                            })
-                            continue
-                        yl.open_space(space_url, force_reload=True)
-
-                    if yl.has_title(target_title):
-                        results.append({
-                            "ok": True, "current_title": target_title, "target_title": target_title,
-                            "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
-                        })
-                        continue
-
-                    candidate = yl.find_resume_candidate(current_title, target_title)
-                    if candidate:
-                        current_title = candidate
-
-                    if yl.has_title(target_title):
-                        results.append({
-                            "ok": True, "current_title": target_title, "target_title": target_title,
-                            "already_done": True, "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
-                        })
-                        continue
-
-                    try:
-                        yl.rename_top_video(current_title, target_title)
-                    except Exception:
-                        fallback_title = Path(target_title).stem
-                        if _title_matches(current_title, fallback_title, self.cfg.uploads.extensions):
-                            raise
-                        yl.open_space(space_url, force_reload=True)
-                        yl.rename_top_video(fallback_title, target_title)
-                        current_title = fallback_title
-
-                    yl.wait_for_title_in_space(space_url, target_title)
-                    results.append({
-                        "ok": True, "current_title": current_title, "target_title": target_title,
-                        "youlearn_ai_name": _youlearn_ai_name(current_title, target_title),
-                    })
-                except Exception as e:
-                    log.exception("batch rename failed for %s", target_title)
-                    results.append({
-                        "ok": False, "current_title": current_title, "target_title": target_title,
-                        "youlearn_ai_name": _youlearn_ai_name(display_title, target_title),
-                        "error": str(e),
-                    })
-        finally:
-            self.browser.shutdown()
-
-        return results
 
     def continue_rename_item(self, space_url: str, display_title: str, target_title: str, content_url: str = "") -> dict:
         try:

@@ -18,6 +18,8 @@ const LOCAL_API_BASE = "http://127.0.0.1:3000";
 const USE_LOCAL_API = !["127.0.0.1", "localhost"].includes(window.location.hostname);
 const API_BASE = USE_LOCAL_API ? LOCAL_API_BASE : "";
 
+let _renameQueueIndexMap = {}; // request_id -> item index
+
 function apiUrl(path) {
   return `${API_BASE}${path}`;
 }
@@ -71,30 +73,33 @@ function renderBatchRows(job, isLiveJob = false) {
       <td class="path-cell">${escape(it.path || it.name)}</td>
       <td class="title-cell">${escape(targetTitle(it))}</td>
       <td class="title-cell">${escape(youlearnAiName(it))}</td>
-      <td class="title-cell">${escape(currentTitle(it))}</td>
+      <td class="title-cell">${escape(renameQueueLabel(it, i) || currentTitle(it))}</td>
       <td>${progressBar(it)}</td>
       <td><span class="badge ${it.status}">${statusLabels[it.status] || it.status}</span></td>
       <td class="muted">${escape(it.error || "")}</td>
-      <td>${retryButton(job, it, i)}</td>
+      <td>${retryRenameButton(job, it, i)}</td>
       <td>${retryNamingButton(it, i)}</td>
       <td>${retryUploadButton(it, i, isLiveJob)}</td>
     </tr>`).join("");
-  document.querySelectorAll("[data-batch-rename]").forEach((button) => {
-    button.addEventListener("click", () => batchRename());
+  document.querySelectorAll("[data-retry-rename]").forEach((button) => {
+    button.addEventListener("click", () => enqueueRename(Number(button.dataset.retryRename)));
+  });
+  document.querySelectorAll("[data-retry-naming]").forEach((button) => {
+    button.addEventListener("click", () => enqueueRename(Number(button.dataset.retryNaming)));
   });
   document.querySelectorAll("[data-retry-upload]").forEach((button) => {
     button.addEventListener("click", () => retryUpload(Number(button.dataset.retryUpload)));
   });
 }
 
-function retryButton(job, item, index) {
+function retryRenameButton(job, item, index) {
   if (!canContinueRename(item)) return "";
-  return `<button class="retry-btn" data-batch-rename="${index}">Continue rename</button>`;
+  return `<button class="retry-btn" data-retry-rename="${index}">Rename</button>`;
 }
 
 function retryNamingButton(item, index) {
   if (!canRetryNaming(item)) return "";
-  return `<button class="retry-btn" data-batch-rename="${index}">Retry naming</button>`;
+  return `<button class="retry-btn" data-retry-naming="${index}">Rename</button>`;
 }
 
 function retryUploadButton(item, index, isLiveJob) {
@@ -136,6 +141,36 @@ function progressInfo(item) {
     ? `${percent}% failed`
     : `${percent}% ${statusLabels[item.status] || item.status || "pending"}`;
   return { percent, label };
+}
+
+function renameQueueLabel(item, idx) {
+  const batch = getLastBatch() || historyCache?.last_batch;
+  const qItem = findQueueItem(batch, idx);
+  if (!qItem) return "";
+  if (qItem.status === "queued") return "⏳ queued (" + queuePosition(qItem.request_id) + ")";
+  if (qItem.status === "renaming") return "🔄 renaming now...";
+  if (qItem.status === "done") return targetTitle(item);
+  if (qItem.status === "failed") return "❌ renamed failed";
+  return "";
+}
+
+function findQueueItem(batch, idx) {
+  if (!batch || !_renameQueueIndexMap) return null;
+  const item = batch.items[idx];
+  if (!item) return null;
+  for (const [rid, qidx] of Object.entries(_renameQueueIndexMap)) {
+    if (qidx === idx) return { request_id: rid, status: _renameQueueIndexMap._status?.[rid] || "unknown" };
+  }
+  return null;
+}
+
+function queuePosition(rid) {
+  if (!_renameQueueIndexMap._snapshot) return "?";
+  const items = _renameQueueIndexMap._snapshot.items || [];
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].request_id === rid) return i + 1;
+  }
+  return "?";
 }
 
 function progressBar(item) {
@@ -237,8 +272,7 @@ es.onmessage = (e) => {
     renderState(JSON.parse(e.data));
   } catch {}
 };
-es.onerror = () => {
-};
+es.onerror = () => {};
 
 async function refreshState() {
   try {
@@ -248,6 +282,65 @@ async function refreshState() {
 }
 setInterval(refreshState, 2000);
 refreshHistory().then(refreshState);
+
+let _renameQueuePollTimer = null;
+
+async function pollRenameQueue() {
+  try {
+    const r = await fetch(apiUrl("/api/rename/queue"), { cache: "no-store" });
+    if (!r.ok) return;
+    const data = await r.json();
+    _renameQueueIndexMap._snapshot = data;
+    const newStatus = {};
+    (data.items || []).forEach((it) => {
+      newStatus[it.request_id] = it.status;
+      if (it.status === "done" || it.status === "failed") {
+        applyQueueResult(it);
+      }
+    });
+    _renameQueueIndexMap._status = newStatus;
+    // Re-render to update queue labels
+    const batch = getLastBatch() || historyCache?.last_batch;
+    if (batch) renderBatchRows(batch);
+
+    if (data.running) {
+      if (!_renameQueuePollTimer) _renameQueuePollTimer = setInterval(pollRenameQueue, 1500);
+    } else {
+      clearInterval(_renameQueuePollTimer);
+      _renameQueuePollTimer = null;
+    }
+  } catch {}
+}
+
+function applyQueueResult(qItem) {
+  if (qItem.status !== "done" && qItem.status !== "failed") return;
+  const idx = _renameQueueIndexMap[qItem.request_id];
+  if (idx === undefined) return;
+  const batch = getLastBatch() || historyCache?.last_batch;
+  if (!batch || !batch.items[idx]) return;
+  const item = batch.items[idx];
+  if (!item) return;
+  const result = qItem.result || {};
+  if (qItem.status === "done") {
+    item.status = "uploaded";
+    item.progress_percent = 100;
+    item.resume_checked_title = result.current_title || currentTitle(item);
+    item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
+    item.display_title = targetTitle(item);
+    item.current_title = result.already_done ? (result.current_title || targetTitle(item)) : targetTitle(item);
+    item.renamed_at = new Date().toISOString();
+    item.validated_at = item.renamed_at;
+    item.error = "";
+  } else {
+    item.status = "failed";
+    item.error = result.error || "Rename failed";
+  }
+  batch.finished_at = Date.now() / 1000;
+  setLastBatch(batch);
+  delete _renameQueueIndexMap[qItem.request_id];
+  refreshHistory();
+  window.UploadPilotDrive?.scheduleSave();
+}
 
 async function refreshHistory() {
   try {
@@ -448,78 +541,48 @@ clearLastBatchBtn.onclick = () => {
   window.UploadPilotDrive?.scheduleSave();
 };
 
-async function batchRename() {
+async function enqueueRename(index) {
   const batch = getLastBatch() || historyCache?.last_batch;
-  if (!batch) return;
+  const item = batch?.items?.[index];
+  if (!batch || !item) return;
 
-  const pendingItems = [];
-  batch.items.forEach((item, i) => {
-    if (canRetryNaming(item) || canContinueRename(item)) {
-      item.status = "renaming";
-      item.progress_percent = 75;
-      item.error = "";
-      item.rename_started_at = new Date().toISOString();
-      pendingItems.push({ item, index: i });
-    }
-  });
-
-  if (pendingItems.length === 0) return;
-  if (!confirm(`Rename ${pendingItems.length} video(s) in one session?`)) return;
-
+  item.status = "renaming";
+  item.progress_percent = 75;
+  item.error = "";
+  item.rename_started_at = new Date().toISOString();
   setLastBatch(batch);
-
-  const bodyItems = pendingItems.map(({ item }) => ({
-    space_url: batch.space_url,
-    display_title: currentTitle(item),
-    target_title: targetTitle(item),
-    youlearn_ai_name: youlearnAiName(item),
-    content_url: item.content_url || "",
-    record_id: item.record_id || `${batch.id || ""}:${item._idx ?? 0}`,
-    job_id: batch.id || "",
-    source_path: item.path || "",
-    folder: batch.folder || "",
-    mode: batch.mode || "",
-  }));
 
   try {
-    const r = await fetch(apiUrl("/api/rename/batch"), {
+    const r = await fetch(apiUrl("/api/rename"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ space_url: batch.space_url, items: bodyItems }),
+      body: JSON.stringify({
+        space_url: batch.space_url,
+        display_title: currentTitle(item),
+        target_title: targetTitle(item),
+        youlearn_ai_name: youlearnAiName(item),
+        content_url: item.content_url || "",
+        record_id: item.record_id || `${batch.id || ""}:${index}`,
+        job_id: batch.id || "",
+        item_index: index,
+        source_path: item.path || "",
+        folder: batch.folder || "",
+        mode: batch.mode || "",
+      }),
     });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({ error: r.statusText }));
-      throw new Error(err.error || err.detail || JSON.stringify(err));
-    }
-    const data = await r.json();
-    data.results.forEach((result, i) => {
-      const { item } = pendingItems[i];
-      if (result.ok) {
-        item.status = "uploaded";
-        item.progress_percent = 100;
-        item.resume_checked_title = result.current_title || currentTitle(item);
-        item.youlearn_ai_name = result.youlearn_ai_name || item.youlearn_ai_name || youlearnAiName(item);
-        item.display_title = targetTitle(item);
-        item.current_title = result.already_done ? (result.current_title || targetTitle(item)) : targetTitle(item);
-        item.renamed_at = new Date().toISOString();
-        item.validated_at = item.renamed_at;
-        item.error = "";
-      } else {
-        item.status = "failed";
-        item.error = result.error || "Batch rename failed";
-      }
-    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(result.error || result.detail || r.statusText);
+    _renameQueueIndexMap[result.request_id] = index;
+    _renameQueueIndexMap._status = _renameQueueIndexMap._status || {};
+    _renameQueueIndexMap._status[result.request_id] = "queued";
+    pollRenameQueue();
+    renderBatchRows(batch);
   } catch (err) {
-    pendingItems.forEach(({ item }) => {
-      item.status = "failed";
-      item.error = err.message;
-    });
+    item.status = "failed";
+    item.error = err.message;
+    batch.finished_at = Date.now() / 1000;
+    setLastBatch(batch);
   }
-
-  batch.finished_at = Date.now() / 1000;
-  setLastBatch(batch);
-  await refreshHistory();
-  window.UploadPilotDrive?.scheduleSave();
 }
 
 async function retryUpload(index) {
