@@ -59,6 +59,10 @@ class PreviewReq(BaseModel):
     folder: str
 
 
+class PickFolderReq(BaseModel):
+    folder: str = ""
+
+
 class RestoreReq(BaseModel):
     date: str | None = None
 
@@ -121,7 +125,6 @@ def upload_history():
     return history.snapshot()
 
 
-@app.post("/api/preview")
 
 @app.post("/api/folder/pick")
 def pick_folder(req: PickFolderReq):
@@ -134,10 +137,13 @@ def pick_folder(req: PickFolderReq):
         chosen = tkinter.filedialog.askdirectory(initialdir=initial, title="Choose videos folder")
         root.destroy()
     except Exception:
-        raise HTTPException(500, "Folder picker not available in this environment")
+        return {"folder": "", "error": "Folder picker not available in this environment"}
     if not chosen:
         return {"folder": ""}
     return {"folder": str(Path(chosen))}
+
+
+@app.post("/api/preview")
 def preview(req: PreviewReq):
     try:
         items = scan_folder(Path(req.folder), cfg.uploads.extensions, cfg.uploads.sort)
