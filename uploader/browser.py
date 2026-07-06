@@ -35,11 +35,11 @@ class BrowserManager:
             thread_id = threading.get_ident()
             if self._ctx is not None and self._owner_thread_id != thread_id:
                 log.warning(
-                    "browser context belongs to another thread; discarding stale reference"
+                    "browser context belongs to another thread; refusing cross-thread reuse"
                 )
-                self._ctx = None
-                self._pw = None
-                self._owner_thread_id = None
+                raise RuntimeError(
+                    "Browser is busy in another worker. Wait for the current browser task to finish."
+                )
             if self._ctx is not None and self._ctx_alive():
                 return self._ctx
             # Stale/closed — tear down and relaunch.
@@ -55,17 +55,49 @@ class BrowserManager:
                 self._owner_thread_id = None
             self.profile_dir.mkdir(parents=True, exist_ok=True)
             log.info("launching chromium with profile=%s headless=%s", self.profile_dir, self.headless)
-            self._pw = sync_playwright().start()
-            self._ctx = self._pw.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
-                headless=self.headless,
-                slow_mo=self.slow_mo_ms,
-                viewport={"width": 1400, "height": 900},
-                accept_downloads=False,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            self._ctx = self._launch_with_retry()
             self._owner_thread_id = thread_id
             return self._ctx
+
+    def _launch_with_retry(self) -> BrowserContext:
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                self._pw = sync_playwright().start()
+                return self._pw.chromium.launch_persistent_context(
+                    user_data_dir=str(self.profile_dir),
+                    headless=self.headless,
+                    slow_mo=self.slow_mo_ms,
+                    viewport={"width": 1400, "height": 900},
+                    accept_downloads=False,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-gpu",
+                    ],
+                )
+            except Exception as e:
+                last_error = e
+                log.warning("chromium launch failed on attempt %s: %s", attempt + 1, e)
+                try:
+                    if self._pw:
+                        self._pw.stop()
+                except Exception:
+                    pass
+                self._pw = None
+                if attempt == 0:
+                    self._remove_stale_profile_locks()
+        assert last_error is not None
+        raise last_error
+
+    def _remove_stale_profile_locks(self) -> None:
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            path = self.profile_dir / name
+            try:
+                if path.exists() or path.is_symlink():
+                    path.unlink()
+                    log.info("removed stale chromium profile lock: %s", path)
+            except Exception as e:
+                log.warning("could not remove chromium profile lock %s: %s", path, e)
 
     def shutdown(self) -> None:
         with self._lock:

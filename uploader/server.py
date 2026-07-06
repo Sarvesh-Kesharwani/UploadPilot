@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 from pathlib import Path
@@ -27,6 +28,12 @@ store = JobStore(on_change=history.record_job)
 browser = BrowserManager(cfg.profile_path, cfg.browser.headless, cfg.browser.slow_mo_ms)
 worker = UploadWorker(cfg, store, browser)
 scrape_lock = threading.Lock()
+scrape_browser = BrowserManager(
+    cfg.profile_path.with_name(f"{cfg.profile_path.name}_scrape"),
+    cfg.browser.headless,
+    cfg.browser.slow_mo_ms,
+)
+scrape_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="summary-scrape")
 
 app = FastAPI(title="UploadPilot", version="0.1")
 app.add_middleware(
@@ -149,34 +156,7 @@ def scrape_summary(req: ScrapeSummaryReq):
     if not scrape_lock.acquire(blocking=False):
         raise HTTPException(409, "A scrape is already running")
     try:
-        yl = YouLearn(
-            browser.context(),
-            cfg.youlearn.dashboard_url,
-            cfg.youlearn.login_url,
-            cfg.youlearn.list_poll_interval_s,
-            cfg.youlearn.list_poll_timeout_s,
-        )
-        yl.ensure_logged_in(cfg.auth.email, cfg.auth.password)
-        scope = req.scope
-        if scope == "auto":
-            scope = "space" if "/space/" in target_url and "/content/" not in target_url else "video"
-        if scope == "space":
-            items = yl.scrape_space_summaries(target_url, max(0, req.max_videos))
-            return {
-                "ok": True,
-                "scope": "space",
-                "url": target_url,
-                "count": len(items),
-                "items": items,
-            }
-        item = yl.scrape_video_summary(target_url)
-        return {
-            "ok": True,
-            "scope": "video",
-            "url": target_url,
-            "summary": item["summary"],
-            "item": item,
-        }
+        return scrape_executor.submit(_scrape_summary_sync, target_url, req.scope, req.max_videos).result()
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -184,6 +164,37 @@ def scrape_summary(req: ScrapeSummaryReq):
         raise HTTPException(500, str(e))
     finally:
         scrape_lock.release()
+
+
+def _scrape_summary_sync(target_url: str, requested_scope: str, max_videos: int) -> dict:
+    yl = YouLearn(
+        scrape_browser.context(),
+        cfg.youlearn.dashboard_url,
+        cfg.youlearn.login_url,
+        cfg.youlearn.list_poll_interval_s,
+        cfg.youlearn.list_poll_timeout_s,
+    )
+    yl.ensure_logged_in(cfg.auth.email, cfg.auth.password)
+    scope = requested_scope
+    if scope == "auto":
+        scope = "space" if "/space/" in target_url and "/content/" not in target_url else "video"
+    if scope == "space":
+        items = yl.scrape_space_summaries(target_url, max(0, max_videos))
+        return {
+            "ok": True,
+            "scope": "space",
+            "url": target_url,
+            "count": len(items),
+            "items": items,
+        }
+    item = yl.scrape_video_summary(target_url)
+    return {
+        "ok": True,
+        "scope": "video",
+        "url": target_url,
+        "summary": item["summary"],
+        "item": item,
+    }
 
 
 @app.post("/api/folder/pick")
@@ -330,3 +341,8 @@ async def events(request: Request):
 @app.on_event("shutdown")
 def _shutdown():
     browser.shutdown()
+    try:
+        scrape_executor.submit(scrape_browser.shutdown).result(timeout=10)
+    except Exception:
+        log.warning("scrape browser did not shut down cleanly", exc_info=True)
+    scrape_executor.shutdown(wait=False, cancel_futures=True)
