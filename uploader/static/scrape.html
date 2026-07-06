@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UploadPilot Scraper</title>
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css?v=scrape-20260706-1" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <img class="app-logo" src="/static/logo.svg" width="54" height="54" alt="UploadPilot logo" />
+        <div>
+          <h1>UploadPilot</h1>
+          <div class="muted">Summary scraper</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="button-link" href="/">Upload</a>
+      </div>
+    </header>
+
+    <section class="card form-card">
+      <div class="section-heading">
+        <h2>Summary extract</h2>
+        <div id="scrape-status" class="summary-pill">idle</div>
+      </div>
+      <div class="row">
+        <label>YouLearn URL
+          <input id="scrape-url" type="url" placeholder="https://app.youlearn.ai/space/... or /content/..." />
+        </label>
+      </div>
+      <div class="row scraper-controls">
+        <label>Scope
+          <select id="scrape-scope">
+            <option value="auto">Auto detect</option>
+            <option value="video">Single video</option>
+            <option value="space">All videos in space</option>
+          </select>
+        </label>
+        <label>Max videos
+          <input id="scrape-max" type="number" min="0" step="1" value="0" />
+        </label>
+        <button id="scrape-run" class="primary">Extract</button>
+      </div>
+      <div class="muted">API: <code>POST /api/scrape/summary</code></div>
+    </section>
+
+    <section class="card progress-card">
+      <div class="section-heading">
+        <h2>Result</h2>
+        <button id="copy-json">Copy JSON</button>
+      </div>
+      <div id="scrape-results" class="scrape-results"></div>
+      <pre id="scrape-json" class="json-output">{}</pre>
+    </section>
+  </main>
+
+  <script src="/static/scrape.js?v=scrape-20260706-1"></script>
+</body>
+</html>

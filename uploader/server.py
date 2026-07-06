@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+import threading
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from .drive_restore import bearer_token, list_backups, restore_backup
 from .history import UploadHistoryStore
 from .jobs import JobStore
 from .worker import UploadWorker, scan_folder
+from .youlearn import YouLearn
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ history = UploadHistoryStore()
 store = JobStore(on_change=history.record_job)
 browser = BrowserManager(cfg.profile_path, cfg.browser.headless, cfg.browser.slow_mo_ms)
 worker = UploadWorker(cfg, store, browser)
+scrape_lock = threading.Lock()
 
 app = FastAPI(title="UploadPilot", version="0.1")
 app.add_middleware(
@@ -99,9 +102,20 @@ class HistoryImportReq(BaseModel):
     data: dict
 
 
+class ScrapeSummaryReq(BaseModel):
+    url: str
+    scope: Literal["auto", "video", "space"] = "auto"
+    max_videos: int = 0
+
+
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/scrape")
+def scrape_page():
+    return FileResponse(STATIC / "scrape.html")
 
 
 @app.get("/api/config")
@@ -123,6 +137,53 @@ def state():
 @app.get("/api/history")
 def upload_history():
     return history.snapshot()
+
+
+@app.post("/api/scrape/summary")
+def scrape_summary(req: ScrapeSummaryReq):
+    target_url = req.url.strip()
+    if not target_url:
+        raise HTTPException(400, "URL is required")
+    if store.current() and store.current().finished_at is None:
+        raise HTTPException(409, "A job is already running")
+    if not scrape_lock.acquire(blocking=False):
+        raise HTTPException(409, "A scrape is already running")
+    try:
+        yl = YouLearn(
+            browser.context(),
+            cfg.youlearn.dashboard_url,
+            cfg.youlearn.login_url,
+            cfg.youlearn.list_poll_interval_s,
+            cfg.youlearn.list_poll_timeout_s,
+        )
+        yl.ensure_logged_in(cfg.auth.email, cfg.auth.password)
+        scope = req.scope
+        if scope == "auto":
+            scope = "space" if "/space/" in target_url and "/content/" not in target_url else "video"
+        if scope == "space":
+            items = yl.scrape_space_summaries(target_url, max(0, req.max_videos))
+            return {
+                "ok": True,
+                "scope": "space",
+                "url": target_url,
+                "count": len(items),
+                "items": items,
+            }
+        item = yl.scrape_video_summary(target_url)
+        return {
+            "ok": True,
+            "scope": "video",
+            "url": target_url,
+            "summary": item["summary"],
+            "item": item,
+        }
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.exception("summary scrape failed")
+        raise HTTPException(500, str(e))
+    finally:
+        scrape_lock.release()
 
 
 @app.post("/api/folder/pick")

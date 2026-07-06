@@ -133,6 +133,8 @@ SEL_LOGGED_OUT_HINTS = [
     'text=/continue with google/i',
     'text=/sign in with google/i',
 ]
+SUMMARY_CLASS_NAMES = ("flex", "flex-col", "gap-0.5", "rounded-2xl")
+SUMMARY_SELECTOR = '[class="flex flex-col gap-0.5 rounded-2xl"]'
 
 
 def _first(page_or_locator, selectors: list[str]) -> Locator | None:
@@ -178,6 +180,21 @@ def _normalize_url(url: str) -> str:
     path = parts.path.rstrip("/")
     query = f"?{parts.query}" if parts.query else ""
     return f"{parts.scheme}://{parts.netloc}{path}{query}".casefold()
+
+
+def _clean_text(text: str) -> str:
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in (text or "").splitlines()]
+    compact: list[str] = []
+    blank = False
+    for line in lines:
+        if not line:
+            if compact and not blank:
+                compact.append("")
+            blank = True
+            continue
+        compact.append(line)
+        blank = False
+    return "\n".join(compact).strip()
 
 
 def _target_url_matches(actual_url: str, target_url: str) -> bool:
@@ -354,6 +371,112 @@ class YouLearn:
             if titles:
                 return titles
         return []
+
+    # ---- summary scraping ----------------------------------------------
+
+    def scrape_video_summary(self, video_url: str) -> dict:
+        p = self.page()
+        p.goto(video_url, wait_until="domcontentloaded")
+        p.wait_for_timeout(1800)
+        return {
+            "url": p.url,
+            "title": self._current_content_title() or "",
+            "summary": self.extract_summary(),
+            "selector": SUMMARY_SELECTOR,
+        }
+
+    def scrape_space_summaries(self, space_url: str, max_videos: int = 0) -> list[dict]:
+        self.open_space(space_url, force_reload=True)
+        self._load_space_rows()
+        total = self._space_row_count()
+        if max_videos > 0:
+            total = min(total, max_videos)
+        results: list[dict] = []
+        for i in range(total):
+            self.open_space(space_url, force_reload=True)
+            self._load_space_rows()
+            row = self._row_at_index(i)
+            if row is None:
+                results.append({"index": i, "title": "", "url": "", "summary": "", "error": "Video row not found"})
+                continue
+            title = self._row_title(row)
+            try:
+                row.click()
+                self.page().wait_for_timeout(1800)
+                results.append({
+                    "index": i,
+                    "title": self._current_content_title() or title,
+                    "url": self.page().url,
+                    "summary": self.extract_summary(),
+                    "selector": SUMMARY_SELECTOR,
+                })
+            except Exception as e:
+                results.append({"index": i, "title": title, "url": self.page().url, "summary": "", "error": str(e)})
+        return results
+
+    def extract_summary(self) -> str:
+        p = self.page()
+        try:
+            p.wait_for_selector(SUMMARY_SELECTOR, state="visible", timeout=12000)
+            candidates = p.locator(SUMMARY_SELECTOR)
+            count = min(candidates.count(), 20)
+            texts = []
+            for i in range(count):
+                text = _clean_text(candidates.nth(i).inner_text(timeout=1500))
+                if text:
+                    texts.append(text)
+            if texts:
+                return max(texts, key=len)
+        except Exception:
+            pass
+        texts = p.evaluate(
+            """(classes) => Array.from(document.querySelectorAll('*'))
+                .filter((el) => classes.every((name) => el.classList.contains(name)))
+                .map((el) => el.innerText || el.textContent || '')
+                .filter(Boolean)""",
+            list(SUMMARY_CLASS_NAMES),
+        )
+        cleaned = [_clean_text(str(text)) for text in texts]
+        cleaned = [text for text in cleaned if text]
+        if not cleaned:
+            raise RuntimeError('Summary element not found: class="flex flex-col gap-0.5 rounded-2xl"')
+        return max(cleaned, key=len)
+
+    def _space_row_count(self) -> int:
+        for sel in SEL_VIDEO_ROWS:
+            try:
+                count = self.page().locator(sel).count()
+                if count:
+                    return count
+            except Exception:
+                continue
+        return 0
+
+    def _load_space_rows(self) -> None:
+        p = self.page()
+        try:
+            p.wait_for_selector(SEL_ANY_ROW, timeout=15000, state="attached")
+        except PWTimeout:
+            return
+        last_count = -1
+        stable = 0
+        for _ in range(16):
+            count = self._space_row_count()
+            if count == last_count:
+                stable += 1
+            else:
+                stable = 0
+                last_count = count
+            if stable >= 2:
+                return
+            try:
+                p.mouse.wheel(0, 1800)
+            except Exception:
+                try:
+                    p.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+            p.wait_for_timeout(500)
 
     # ---- upload ---------------------------------------------------------
 
