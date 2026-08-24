@@ -51,10 +51,19 @@
     <section class="card progress-card">
       <div class="section-heading">
         <h2>Result</h2>
-        <button id="copy-json">Copy JSON</button>
+        <div class="progress-actions">
+          <a id="download-md" class="button-link hidden">Download Markdown</a>
+        </div>
       </div>
       <div id="scrape-results" class="scrape-results"></div>
-      <pre id="scrape-json" class="json-output">{}</pre>
+    </section>
+
+    <section class="card progress-card">
+      <div class="section-heading">
+        <h2>Cached summaries</h2>
+        <button id="refresh-cache">Refresh</button>
+      </div>
+      <div id="cache-list" class="cache-list"></div>
     </section>
   </main>
 

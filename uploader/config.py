@@ -7,7 +7,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env", encoding="utf-8-sig")
 
 
 class ServerCfg(BaseModel):

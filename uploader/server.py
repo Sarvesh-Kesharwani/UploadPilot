@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
@@ -34,6 +36,9 @@ scrape_browser = BrowserManager(
     cfg.browser.slow_mo_ms,
 )
 scrape_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="summary-scrape")
+SCRAPE_TIMEOUT_S = 1800
+SCRAPE_CACHE_DIR = cfg_mod.ROOT / ".state" / "scrape_cache"
+SCRAPE_CACHE_INDEX = SCRAPE_CACHE_DIR / "index.json"
 
 app = FastAPI(title="UploadPilot", version="0.1")
 app.add_middleware(
@@ -146,6 +151,23 @@ def upload_history():
     return history.snapshot()
 
 
+@app.get("/api/scrape/cache")
+def scrape_cache_list():
+    return {"items": _read_scrape_cache()}
+
+
+@app.get("/api/scrape/cache/{entry_id}/download")
+def scrape_cache_download(entry_id: str):
+    entry = _cache_entry(entry_id)
+    if not entry:
+        raise HTTPException(404, "Cached summary not found")
+    path = SCRAPE_CACHE_DIR / entry["filename"]
+    if not path.exists():
+        raise HTTPException(404, "Cached summary file missing")
+    media_type = "application/json" if path.suffix.lower() == ".json" else "text/markdown"
+    return FileResponse(path, media_type=media_type, filename=entry["filename"])
+
+
 @app.post("/api/scrape/summary")
 def scrape_summary(req: ScrapeSummaryReq):
     target_url = req.url.strip()
@@ -156,7 +178,16 @@ def scrape_summary(req: ScrapeSummaryReq):
     if not scrape_lock.acquire(blocking=False):
         raise HTTPException(409, "A scrape is already running")
     try:
-        return scrape_executor.submit(_scrape_summary_sync, target_url, req.scope, req.max_videos).result()
+        result = scrape_executor.submit(_scrape_summary_sync, target_url, req.scope, req.max_videos).result(
+            timeout=SCRAPE_TIMEOUT_S
+        )
+        _clean_scrape_result(result)
+        cache_entry = _save_scrape_result(result)
+        result["cache"] = cache_entry
+        return result
+    except FutureTimeout:
+        log.error("summary scrape timed out after %ss", SCRAPE_TIMEOUT_S)
+        raise HTTPException(504, f"Summary scrape timed out after {SCRAPE_TIMEOUT_S} seconds")
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -195,6 +226,213 @@ def _scrape_summary_sync(target_url: str, requested_scope: str, max_videos: int)
         "summary": item["summary"],
         "item": item,
     }
+
+
+def _read_scrape_cache() -> list[dict]:
+    try:
+        data = json.loads(SCRAPE_CACHE_INDEX.read_text(encoding="utf-8-sig"))
+        items = data.get("items", [])
+        return items if isinstance(items, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception:
+        log.warning("scrape cache index is unreadable", exc_info=True)
+        return []
+
+
+def _write_scrape_cache(items: list[dict]) -> None:
+    SCRAPE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SCRAPE_CACHE_INDEX.write_text(
+        json.dumps({"items": items}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _cache_entry(entry_id: str) -> dict | None:
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", entry_id or ""):
+        return None
+    for entry in _read_scrape_cache():
+        if entry.get("id") == entry_id:
+            return entry
+    return None
+
+
+def _save_scrape_result(result: dict) -> dict:
+    items = result.get("items") or ([result.get("item")] if result.get("item") else [])
+    items = [item for item in items if isinstance(item, dict) and not item.get("error")]
+    if not items:
+        raise RuntimeError("No summary was extracted to save")
+    created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    title = _cache_title(result, items)
+    markdown = _result_to_markdown(result, items, created_at)
+    entry_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{_slugify(title)[:56]}"
+    SCRAPE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if result.get("scope") == "space":
+        filename = f"{entry_id}.json"
+        file_format = "json"
+        json_payload = _result_to_json_payload(result, items, created_at)
+        (SCRAPE_CACHE_DIR / filename).write_text(
+            json.dumps(json_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    else:
+        filename = f"{entry_id}.md"
+        file_format = "markdown"
+        (SCRAPE_CACHE_DIR / filename).write_text(markdown, encoding="utf-8")
+    entry = {
+        "id": entry_id,
+        "title": title,
+        "scope": result.get("scope", ""),
+        "format": file_format,
+        "source_url": result.get("url", ""),
+        "filename": filename,
+        "download_url": f"/api/scrape/cache/{entry_id}/download",
+        "created_at": created_at,
+        "count": len(items),
+        "excerpt": _excerpt(" ".join(item.get("summary", "") for item in items)),
+    }
+    cache = _read_scrape_cache()
+    cache.insert(0, entry)
+    _write_scrape_cache(cache[:100])
+    cached = {**entry, "markdown": markdown}
+    if result.get("scope") == "space":
+        cached["json"] = json_payload
+    return cached
+
+
+def _clean_scrape_result(result: dict) -> None:
+    items = result.get("items") or ([result.get("item")] if result.get("item") else [])
+    for item in items:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        item["summary"] = _summary_markdown(item.get("summary", ""))
+    if result.get("item"):
+        result["summary"] = result["item"].get("summary", "")
+
+
+def _cache_title(result: dict, items: list[dict]) -> str:
+    if result.get("scope") == "space":
+        return f"Space summary ({len(items)} videos)"
+    return (items[0].get("title") or "Video summary").strip()
+
+
+def _result_to_markdown(result: dict, items: list[dict], created_at: str) -> str:
+    title = _cache_title(result, items)
+    parts = [
+        f"# {_md_text(title)}",
+        "",
+        f"- Source: {result.get('url', '')}",
+        f"- Scope: {result.get('scope', '')}",
+        f"- Extracted: {created_at}",
+        "",
+    ]
+    for item in items:
+        item_title = _md_text(item.get("title") or "Untitled video")
+        if result.get("scope") == "space":
+            parts.extend([f"## {item_title}", ""])
+        elif item_title and item_title != title:
+            parts.extend([f"## {item_title}", ""])
+        if item.get("url"):
+            parts.extend([f"Source video: {item['url']}", ""])
+        parts.extend([_summary_markdown(item.get("summary", "")), ""])
+    return "\n".join(parts).strip() + "\n"
+
+
+def _result_to_json_payload(result: dict, items: list[dict], created_at: str) -> dict:
+    return {
+        "space_url": result.get("url", ""),
+        "created_at": created_at,
+        "count": len(items),
+        "videos": [
+            {
+                "title": _md_text(item.get("title") or "Untitled video"),
+                "source_url": item.get("url", ""),
+                "markdown_summary": _summary_markdown(item.get("summary", "")),
+            }
+            for item in items
+        ],
+    }
+
+
+def _summary_markdown(text: str) -> str:
+    cleaned = []
+    for raw in (text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw).strip()
+        if not line:
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+            continue
+        line = re.sub(r"^[•·]\s*", "- ", line)
+        line = re.sub(r"^[-*]\s+", "- ", line)
+        cleaned.append(line)
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return "\n".join(cleaned)
+
+
+def _summary_markdown(text: str) -> str:
+    text = _strip_css_noise(text or "")
+    cleaned = []
+    for raw in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", raw).strip()
+        if _is_css_noise_line(line):
+            continue
+        if not line:
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+            continue
+        line = re.sub(r"^\+\d+\s*", "", line)
+        line = re.sub(r"^[•·]\s*", "- ", line)
+        line = re.sub(r"^[-*]\s+", "- ", line)
+        line = re.sub(r"\s*(\d{1,2}:\d{2})\s*\.\s*", r" \1\n\n", line)
+        cleaned.append(line)
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned)).strip()
+
+
+def _strip_css_noise(text: str) -> str:
+    text = re.sub(r"(?s)/\*.*?\*/", "\n", text)
+    text = re.sub(r"(?ms)^\s*\.[^{\n]+\{.*?^\s*\}\s*", "\n", text)
+    return text
+
+
+def _is_css_noise_line(line: str) -> bool:
+    if not line:
+        return False
+    css_prefixes = (
+        ".mermaid-container",
+        "#mermaid_",
+        "@keyframes",
+        "fill:",
+        "stroke:",
+        "color:",
+        "background:",
+        "border:",
+        "font-",
+    )
+    return (
+        line in {"{", "}"}
+        or line.startswith(css_prefixes)
+        or "#mermaid_" in line
+        or "@keyframes" in line
+        or "{font-family:" in line
+        or bool(re.match(r"^[a-zA-Z-]+:\s*[^;]+;?$", line))
+    )
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
+    return slug or "summary"
+
+
+def _excerpt(text: str, limit: int = 220) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    return compact if len(compact) <= limit else compact[: limit - 1].rstrip() + "..."
+
+
+def _md_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip() or "Untitled"
 
 
 @app.post("/api/folder/pick")

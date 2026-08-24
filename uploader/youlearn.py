@@ -133,8 +133,10 @@ SEL_LOGGED_OUT_HINTS = [
     'text=/continue with google/i',
     'text=/sign in with google/i',
 ]
-SUMMARY_CLASS_NAMES = ("flex", "flex-col", "gap-0.5", "rounded-2xl")
-SUMMARY_SELECTOR = '[class="flex flex-col gap-0.5 rounded-2xl"]'
+SUMMARY_CLASS_NAMES = ("summary-display", "flex", "flex-col", "pt-4")
+SUMMARY_SELECTOR = ".summary-display.flex.flex-col.pt-4"
+SUMMARY_FALLBACK_CLASS_NAMES = ("flex", "flex-col", "gap-0.5", "rounded-2xl")
+SUMMARY_FALLBACK_SELECTOR = ".flex.flex-col.gap-0\\.5.rounded-2xl"
 
 
 def _first(page_or_locator, selectors: list[str]) -> Locator | None:
@@ -346,31 +348,47 @@ class YouLearn:
     def list_video_titles(self) -> list[str]:
         """Return titles currently visible in the space content list."""
         p = self.page()
-        # wait briefly for any row to render so first read isn't empty
-        try:
-            p.wait_for_selector(SEL_ANY_ROW, timeout=15000, state="attached")
-        except PWTimeout:
-            pass
-        for sel in SEL_VIDEO_ROWS:
-            rows = p.locator(sel)
+
+        def _read() -> list[str]:
             try:
-                count = rows.count()
-            except Exception:
-                count = 0
-            if count == 0:
-                continue
-            titles = []
-            for i in range(count):
-                span = rows.nth(i).locator(SEL_ROW_TITLE).first
+                p.wait_for_selector(SEL_ANY_ROW, timeout=12000, state="attached")
+            except PWTimeout:
+                pass
+            for sel in SEL_VIDEO_ROWS:
+                rows = p.locator(sel)
                 try:
-                    t = span.inner_text(timeout=1000).strip()
+                    count = rows.count()
                 except Exception:
-                    t = rows.nth(i).inner_text().strip().splitlines()[0].strip()
-                if t:
-                    titles.append(t)
-            if titles:
-                return titles
-        return []
+                    count = 0
+                if count == 0:
+                    continue
+                titles = []
+                for i in range(count):
+                    span = rows.nth(i).locator(SEL_ROW_TITLE).first
+                    try:
+                        t = span.inner_text(timeout=1000).strip()
+                    except Exception:
+                        try:
+                            t = rows.nth(i).inner_text(timeout=1000).strip().splitlines()[0].strip()
+                        except Exception:
+                            continue
+                    if t:
+                        titles.append(t)
+                if titles:
+                    return titles
+            return []
+
+        titles = _read()
+        if not titles:
+            # Transient empty render: reload once and retry before treating the
+            # space as empty (avoids duplicate re-uploads in large spaces).
+            try:
+                p.reload(wait_until="domcontentloaded")
+                p.wait_for_timeout(2500)
+                titles = _read()
+            except Exception:
+                titles = []
+        return titles
 
     # ---- summary scraping ----------------------------------------------
 
@@ -378,8 +396,10 @@ class YouLearn:
         p = self.page()
         p.goto(video_url, wait_until="domcontentloaded")
         p.wait_for_timeout(1800)
+        source_url = p.url
+        self._open_summary_set()
         return {
-            "url": p.url,
+            "url": source_url,
             "title": self._current_content_title() or "",
             "summary": self.extract_summary(),
             "selector": SUMMARY_SELECTOR,
@@ -403,10 +423,12 @@ class YouLearn:
             try:
                 row.click()
                 self.page().wait_for_timeout(1800)
+                source_url = self.page().url
+                self._open_summary_set()
                 results.append({
                     "index": i,
                     "title": self._current_content_title() or title,
-                    "url": self.page().url,
+                    "url": source_url,
                     "summary": self.extract_summary(),
                     "selector": SUMMARY_SELECTOR,
                 })
@@ -414,33 +436,431 @@ class YouLearn:
                 results.append({"index": i, "title": title, "url": self.page().url, "summary": "", "error": str(e)})
         return results
 
-    def extract_summary(self) -> str:
+    def _open_summary_set(self) -> bool:
+        if self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=800) or self._extract_open_summary_text():
+            return True
+        if self._click_summary_set_entry():
+            return True
+        if not self._click_summary_generator():
+            log.warning("summary generator button not found")
+            return False
+        return self._wait_for_generated_summary_set()
+
+    def _click_summary_set_entry(self) -> bool:
         p = self.page()
         try:
-            p.wait_for_selector(SUMMARY_SELECTOR, state="visible", timeout=12000)
-            candidates = p.locator(SUMMARY_SELECTOR)
-            count = min(candidates.count(), 20)
-            texts = []
-            for i in range(count):
-                text = _clean_text(candidates.nth(i).inner_text(timeout=1500))
-                if text:
-                    texts.append(text)
-            if texts:
-                return max(texts, key=len)
+            target = self._generated_summary_entry_target()
+            if target:
+                log.info("opening generated summary set: %s", target.get("text", "")[:120])
+                p.mouse.click(target["x"], target["y"])
+                p.wait_for_timeout(1200)
+                if self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=6000) or self._extract_open_summary_text():
+                    return True
+        except Exception as e:
+            last_error = str(e)
+        else:
+            last_error = "Summary entry not found"
+        selectors = [
+            'xpath=//*[contains(normalize-space(.), "My Sets")]/following::*[contains(normalize-space(.), "Summary") and contains(normalize-space(.), "All topics")][1]',
+            'text=/Detailed Summary/i',
+        ]
+        for sel in selectors:
+            try:
+                loc = p.locator(sel).first
+                loc.wait_for(state="visible", timeout=2500)
+                loc.click()
+                p.wait_for_timeout(1800)
+                if self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=6000) or self._extract_open_summary_text():
+                    return True
+            except Exception as e:
+                last_error = str(e)
+                continue
+        log.warning("summary set entry not opened: %s", last_error)
+        return False
+
+    def _generated_summary_entry_target(self) -> dict | None:
+        current_title = self._current_content_title() or ""
+        try:
+            return self.page().evaluate(
+                """(currentTitle) => {
+                    const text = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const visible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0;
+                    };
+                    const all = Array.from(document.querySelectorAll('body *'));
+                    const mySets = all.find((el) => text(el) === 'My Sets');
+                    if (!mySets) return null;
+                    const mySetsRect = mySets.getBoundingClientRect();
+                    const title = String(currentTitle || '').toLowerCase();
+                    const badText = /Your generated sets will appear here|Generate from|Podcast|Quiz|Flashcards|Notes|Lesson Plan|New Chat|Chatting in/i;
+                    const rowFor = (el) => {
+                        let node = el;
+                        for (let i = 0; node && i < 8; i += 1, node = node.parentElement) {
+                            const r = node.getBoundingClientRect();
+                            const t = text(node);
+                            if (
+                                visible(node)
+                                && r.left > window.innerWidth * 0.45
+                                && r.top > mySetsRect.bottom
+                                && r.width >= 260
+                                && r.height >= 35
+                                && r.height <= 130
+                                && t.length >= 10
+                                && !badText.test(t)
+                            ) {
+                                return node;
+                            }
+                        }
+                        return null;
+                    };
+                    const rows = [];
+                    const seen = new Set();
+                    for (const el of all) {
+                        if (!visible(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        const t = text(el);
+                        if (
+                            r.left <= window.innerWidth * 0.45
+                            || r.top <= mySetsRect.bottom
+                            || t.length < 10
+                            || t.length > 700
+                            || badText.test(t)
+                        ) continue;
+                        const row = rowFor(el);
+                        if (!row) continue;
+                        const rr = row.getBoundingClientRect();
+                        const key = `${Math.round(rr.left)}:${Math.round(rr.top)}:${Math.round(rr.width)}:${Math.round(rr.height)}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        const rowText = text(row);
+                        let score = 0;
+                        if (/Detailed Summary|All topics/i.test(rowText)) score += 100;
+                        if (/Summary/i.test(rowText)) score += 60;
+                        if (title && rowText.toLowerCase().includes(title.slice(0, Math.min(40, title.length)))) score += 40;
+                        score += Math.max(0, 30 - Math.round((rr.top - mySetsRect.bottom) / 20));
+                        rows.push({ row, rowText, score, rect: rr });
+                    }
+                    rows.sort((a, b) => b.score - a.score || a.rect.top - b.rect.top);
+                    const best = rows[0];
+                    if (!best) return null;
+                    best.row.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    const r = best.row.getBoundingClientRect();
+                    return {
+                        x: Math.round(r.left + Math.min(120, Math.max(45, r.width * 0.18))),
+                        y: Math.round(r.top + r.height / 2),
+                        text: best.rowText,
+                    };
+                }""",
+                current_title,
+            )
         except Exception:
-            pass
-        texts = p.evaluate(
+            return None
+
+    def _click_summary_generator(self) -> bool:
+        p = self.page()
+        try:
+            summary_labels = p.get_by_text("Summary", exact=True).all()
+            for label in summary_labels[:20]:
+                try:
+                    target = label.evaluate(
+                        """(el) => {
+                            const text = (node) => (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                            const visible = (node) => {
+                                const r = node.getBoundingClientRect();
+                                return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0;
+                            };
+                            const all = Array.from(document.querySelectorAll('body *'));
+                            const mySets = all.find((node) => text(node) === 'My Sets');
+                            const beforeMySets = (node) => !mySets || Boolean(node.compareDocumentPosition(mySets) & Node.DOCUMENT_POSITION_FOLLOWING);
+                            let node = el;
+                            for (let i = 0; node && i < 8; i += 1, node = node.parentElement) {
+                                const r = node.getBoundingClientRect();
+                                const t = text(node);
+                                if (
+                                    visible(node)
+                                    && beforeMySets(node)
+                                    && r.left > window.innerWidth * 0.45
+                                    && r.width >= 150
+                                    && r.height >= 45
+                                    && r.height <= 140
+                                    && /Summary/.test(t)
+                                    && !/Podcast|Video|Quiz|Flashcards|Notes|Lesson Plan/.test(t.replace('Summary', ''))
+                                ) {
+                                    return {
+                                        x: Math.round(r.left + Math.min(90, Math.max(35, r.width * 0.28))),
+                                        y: Math.round(r.top + r.height / 2),
+                                        text: t,
+                                    };
+                                }
+                            }
+                            const r = el.getBoundingClientRect();
+                            if (visible(el) && beforeMySets(el) && r.left > window.innerWidth * 0.45) {
+                                return {
+                                    x: Math.round(r.left + r.width / 2),
+                                    y: Math.round(r.top + r.height / 2),
+                                    text: text(el),
+                                };
+                            }
+                            return null;
+                        }"""
+                    )
+                    if target:
+                        log.info("clicking summary generator card: %s", target.get("text", "")[:120])
+                        p.mouse.click(target["x"], target["y"])
+                        p.wait_for_timeout(500)
+                        return True
+                except Exception:
+                    continue
+            target = p.evaluate(
+                """() => {
+                    const text = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const visible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0;
+                    };
+                    const all = Array.from(document.querySelectorAll('body *'));
+                    const mySets = all.find((el) => text(el) === 'My Sets');
+                    const beforeMySets = (el) => !mySets || Boolean(el.compareDocumentPosition(mySets) & Node.DOCUMENT_POSITION_FOLLOWING);
+                    const findCard = (el) => {
+                        let node = el;
+                        for (let i = 0; node && i < 8; i += 1, node = node.parentElement) {
+                            const r = node.getBoundingClientRect();
+                            const role = node.getAttribute && node.getAttribute('role');
+                            const cls = String(node.className || '').toLowerCase();
+                            const t = text(node);
+                            if (
+                                visible(node)
+                                && beforeMySets(node)
+                                && /Summary/.test(t)
+                                && !/Podcast|Video|Quiz|Flashcards|Notes|Lesson Plan/.test(t.replace('Summary', ''))
+                                && r.width >= 180
+                                && r.height >= 50
+                                && r.height <= 130
+                                && (node.tagName === 'BUTTON' || role === 'button' || node.tabIndex >= 0 || cls.includes('cursor-pointer') || cls.includes('rounded'))
+                            ) {
+                                return node;
+                            }
+                        }
+                        return el;
+                    };
+                    const candidates = all.filter((el) => {
+                        const t = text(el);
+                        const r = el.getBoundingClientRect();
+                        return visible(el)
+                            && beforeMySets(el)
+                            && /Summary/.test(t)
+                            && !/Podcast|Video|Quiz|Flashcards|Notes|Lesson Plan|My Sets|Generate from/.test(t.replace('Summary', ''))
+                            && (r.left + r.width / 2) > window.innerWidth * 0.45;
+                    });
+                    for (const candidate of candidates) {
+                        const card = findCard(candidate);
+                        card.scrollIntoView({ block: 'center', inline: 'nearest' });
+                        const r = card.getBoundingClientRect();
+                        return {
+                            x: Math.round(r.left + Math.min(90, Math.max(36, r.width * 0.28))),
+                            y: Math.round(r.top + r.height / 2),
+                            text: text(card),
+                        };
+                    }
+                    return null;
+                }"""
+            )
+            if not target:
+                log.warning("summary generator card not found")
+                return False
+            log.info("clicking summary generator card: %s", target.get("text", "")[:120])
+            p.mouse.click(target["x"], target["y"])
+            p.wait_for_timeout(500)
+            return True
+        except Exception as e:
+            log.warning("summary generator click failed: %s", e)
+            return False
+
+    def _wait_for_generated_summary_set(self, timeout_s: float = 600.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        last_log = 0.0
+        while time.monotonic() < deadline:
+            self.page().wait_for_timeout(2000)
+            if self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=500) or self._extract_open_summary_text():
+                return True
+            target = self._generated_summary_entry_target()
+            if target:
+                log.info("generated summary detected in My Sets: %s", target.get("text", "")[:120])
+                self.page().mouse.click(target["x"], target["y"])
+                self.page().wait_for_timeout(1200)
+                if self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=12000) or self._extract_open_summary_text():
+                    return True
+            now = time.monotonic()
+            if now - last_log >= 10:
+                log.info("waiting for summary generation completion: %s", self._summary_generation_status())
+                last_log = now
+        raise RuntimeError(f"Generated summary did not appear in My Sets within {int(timeout_s)} seconds")
+
+    def _summary_generation_status(self) -> str:
+        try:
+            return self.page().evaluate(
+                """() => {
+                    const text = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const all = Array.from(document.querySelectorAll('body *'));
+                    const mySets = all.find((el) => text(el) === 'My Sets');
+                    const body = text(document.body);
+                    if (document.querySelector('.summary-display.flex.flex-col.pt-4')) return 'summary-open';
+                    if (mySets && !body.includes('Your generated sets will appear here')) return 'my-sets-changed';
+                    if (/generating|processing|creating|loading|queued|in progress/i.test(body)) return 'generating';
+                    if (/failed|try again|error/i.test(body)) return 'error-visible';
+                    return mySets ? 'waiting-empty-my-sets' : 'waiting-my-sets';
+                }"""
+            )
+        except Exception as e:
+            return f"status-unavailable: {e}"
+
+    def extract_summary(self) -> str:
+        p = self.page()
+        text = self._extract_markdown_by_selector(SUMMARY_SELECTOR, timeout_ms=3000)
+        if text:
+            return text
+        text = self._extract_markdown_by_classes(SUMMARY_CLASS_NAMES)
+        if text:
+            return text
+        text = self._extract_open_summary_text()
+        if text:
+            return text
+        raise RuntimeError('Summary element not found: class="summary-display flex flex-col pt-4"')
+
+    def _extract_markdown_by_selector(self, selector: str, timeout_ms: int = 3000) -> str:
+        try:
+            self.page().wait_for_selector(selector, state="visible", timeout=timeout_ms)
+        except Exception:
+            return ""
+        return self._extract_markdown_from_page({"selector": selector})
+
+    def _extract_markdown_by_classes(self, classes: tuple[str, ...]) -> str:
+        return self._extract_markdown_from_page({"classes": list(classes)})
+
+    def _extract_markdown_from_page(self, target: dict) -> str:
+        try:
+            candidates = self.page().evaluate(
+                """(target) => {
+                    const roots = target.selector
+                        ? Array.from(document.querySelectorAll(target.selector))
+                        : Array.from(document.querySelectorAll('*')).filter((el) =>
+                            target.classes.every((name) => el.classList.contains(name))
+                        );
+                    const clean = (value) => (value || '').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
+                    const isVisual = (el) => {
+                        const tag = el.tagName.toLowerCase();
+                        const marker = `${el.id || ''} ${el.className || ''}`.toLowerCase();
+                        return ['svg', 'img', 'canvas', 'picture', 'video', 'style', 'script'].includes(tag)
+                            || marker.includes('mermaid')
+                            || marker.includes('diagram')
+                            || marker.includes('chart')
+                            || marker.includes('image')
+                            || marker.includes('recharts');
+                    };
+                    const inline = (node) => {
+                        if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+                        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+                        const tag = node.tagName.toLowerCase();
+                        if (isVisual(node)) return '';
+                        const content = Array.from(node.childNodes).map(inline).join('');
+                        if (tag === 'strong' || tag === 'b') return `**${clean(content)}**`;
+                        if (tag === 'em' || tag === 'i') return `_${clean(content)}_`;
+                        if (tag === 'code') return `\\`${clean(content)}\\``;
+                        if (tag === 'br') return '\\n';
+                        return content;
+                    };
+                    const block = (node, depth = 0) => {
+                        if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+                        if (node.nodeType !== Node.ELEMENT_NODE || isVisual(node)) return '';
+                        const tag = node.tagName.toLowerCase();
+                        if (/^h[1-6]$/.test(tag)) {
+                            const level = Math.min(Number(tag.slice(1)) + 1, 6);
+                            return `${'#'.repeat(level)} ${clean(inline(node))}\\n\\n`;
+                        }
+                        if (tag === 'li') return `- ${clean(Array.from(node.childNodes).map(inline).join(''))}\\n`;
+                        if (tag === 'ul' || tag === 'ol') return `${Array.from(node.children).map((child) => block(child, depth + 1)).join('')}\\n`;
+                        if (tag === 'p') return `${clean(inline(node))}\\n\\n`;
+                        if (tag === 'table') {
+                            return `${clean(node.innerText || node.textContent || '')}\\n\\n`;
+                        }
+                        const childBlocks = Array.from(node.childNodes).map((child) => block(child, depth)).join('');
+                        if (['div', 'section', 'article'].includes(tag) && depth > 0) return `${clean(childBlocks)}\\n\\n`;
+                        return childBlocks;
+                    };
+                    return roots.map((root) => {
+                        const clone = root.cloneNode(true);
+                        clone.querySelectorAll('svg,img,canvas,picture,video,style,script,[class*="mermaid"],[id*="mermaid"],[class*="diagram"],[class*="chart"],[class*="recharts"]').forEach((el) => el.remove());
+                        return clean(block(clone));
+                    }).filter(Boolean);
+                }""",
+                target,
+            )
+        except Exception:
+            return ""
+        cleaned = [_clean_text(str(text)) for text in candidates]
+        cleaned = [text for text in cleaned if text]
+        return max(cleaned, key=len) if cleaned else ""
+
+    def _extract_text_by_selector(self, selector: str, timeout_ms: int = 12000) -> str:
+        p = self.page()
+        try:
+            p.wait_for_selector(selector, state="visible", timeout=timeout_ms)
+            texts = p.evaluate(
+                """(selector) => Array.from(document.querySelectorAll(selector))
+                    .map((el) => el.innerText || el.textContent || '')
+                    .filter(Boolean)""",
+                selector,
+            )
+            cleaned = [_clean_text(str(text)) for text in texts]
+            cleaned = [text for text in cleaned if text]
+            if cleaned:
+                return max(cleaned, key=len)
+        except Exception:
+            return ""
+        return ""
+
+    def _extract_text_by_classes(self, classes: tuple[str, ...]) -> str:
+        texts = self.page().evaluate(
             """(classes) => Array.from(document.querySelectorAll('*'))
                 .filter((el) => classes.every((name) => el.classList.contains(name)))
                 .map((el) => el.innerText || el.textContent || '')
                 .filter(Boolean)""",
-            list(SUMMARY_CLASS_NAMES),
+            list(classes),
         )
         cleaned = [_clean_text(str(text)) for text in texts]
         cleaned = [text for text in cleaned if text]
-        if not cleaned:
-            raise RuntimeError('Summary element not found: class="flex flex-col gap-0.5 rounded-2xl"')
-        return max(cleaned, key=len)
+        return max(cleaned, key=len) if cleaned else ""
+
+    def _extract_open_summary_text(self) -> str:
+        try:
+            texts = self.page().evaluate(
+                """() => {
+                    const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                    const nodes = Array.from(document.querySelectorAll('body *'));
+                    return nodes
+                        .filter((el) => {
+                            const r = el.getBoundingClientRect();
+                            const t = clean(el.innerText || el.textContent || '');
+                            return r.left > window.innerWidth * 0.45
+                                && r.width > 80
+                                && r.height > 40
+                                && t.length > 160
+                                && /\\d{1,2}:\\d{2}/.test(t)
+                                && !t.includes('Watch on YouTube')
+                                && !t.includes('Chapters Transcripts')
+                                && !t.includes('Generate from')
+                                && !t.includes('My Sets');
+                        })
+                        .map((el) => el.innerText || el.textContent || '')
+                        .filter(Boolean);
+                }"""
+            )
+        except Exception:
+            return ""
+        cleaned = [_clean_text(str(text)) for text in texts]
+        cleaned = [text for text in cleaned if text]
+        return min(cleaned, key=len) if cleaned else ""
 
     def _space_row_count(self) -> int:
         for sel in SEL_VIDEO_ROWS:

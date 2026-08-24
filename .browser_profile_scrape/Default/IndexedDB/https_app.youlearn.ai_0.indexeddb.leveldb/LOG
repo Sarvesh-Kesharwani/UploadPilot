@@ -1,0 +1,14 @@
+2026/08/17-12:46:00.956 38e0 Reusing MANIFEST D:\UploadPilot\.browser_profile_scrape\Default\IndexedDB\https_app.youlearn.ai_0.indexeddb.leveldb/MANIFEST-000001
+2026/08/17-12:46:00.982 38e0 Recovering log #63
+2026/08/17-12:46:00.983 38e0 Reusing old log D:\UploadPilot\.browser_profile_scrape\Default\IndexedDB\https_app.youlearn.ai_0.indexeddb.leveldb/000063.log 
+2026/08/17-12:46:00.984 38e0 Delete type=2 #62
+2026/08/17-12:46:01.132 38e0 Level-0 table #68: started
+2026/08/17-12:46:01.135 38e0 Level-0 table #68: 6476 bytes OK
+2026/08/17-12:46:01.137 38e0 Delete type=0 #63
+2026/08/17-12:46:01.138 9e80 Manual compaction at level-0 from '\x00\x1a\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x1b\x00\x00\x00' @ 0 : 0; will stop at '\x00\x1a\x00\x00\x05' @ 1449 : 1
+2026/08/17-12:46:01.138 9e80 Compacting 1@0 + 1@1 files
+2026/08/17-12:46:01.145 9e80 Generated table #69@0: 296 keys, 3860 bytes
+2026/08/17-12:46:01.145 9e80 Compacted 1@0 + 1@1 files => 3860 bytes
+2026/08/17-12:46:01.146 9e80 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/08/17-12:46:01.147 9e80 Delete type=2 #68
+2026/08/17-12:46:01.147 9e80 Manual compaction at level-0 from '\x00\x1a\x00\x00\x05' @ 1449 : 1 .. '\x00\x1b\x00\x00\x00' @ 0 : 0; will stop at (end)

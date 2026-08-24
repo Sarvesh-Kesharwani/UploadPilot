@@ -314,6 +314,34 @@ button:disabled {
   margin-bottom: 14px;
 }
 
+.cache-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cache-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.cache-entry p {
+  margin: 4px 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.cache-entry small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .summary-card {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -337,16 +365,66 @@ button:disabled {
   text-decoration: none;
 }
 
-.summary-card pre,
+.markdown-summary,
 .json-output {
   max-height: 440px;
   margin: 0;
   overflow: auto;
   padding: 14px;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: #1f2937;
   background: #fbfdff;
+}
+
+.markdown-summary {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.markdown-summary h2,
+.markdown-summary h3 {
+  margin: 8px 0 10px;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.markdown-summary h2 {
+  font-size: 20px;
+}
+
+.markdown-summary h3 {
+  font-size: 16px;
+}
+
+.markdown-summary p {
+  margin: 0 0 12px;
+}
+
+.markdown-summary ul {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+
+.markdown-summary li {
+  padding-left: 3px;
+}
+
+.time-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.json-output {
+  white-space: pre-wrap;
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
@@ -559,6 +637,9 @@ th {
     grid-template-columns: 1fr;
   }
   .scraper-controls {
+    grid-template-columns: 1fr;
+  }
+  .cache-entry {
     grid-template-columns: 1fr;
   }
 }

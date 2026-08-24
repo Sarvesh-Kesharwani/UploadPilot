@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import queue
 import threading
 import time
@@ -39,8 +40,15 @@ def _youlearn_ai_name(title: str, target_title: str) -> str:
 
 def scan_folder(folder: Path, extensions: list[str], sort: str) -> list[FileItem]:
     exts = {e.lower() for e in extensions}
-    files = [p for p in folder.rglob("*")
-             if p.is_file() and p.suffix.lower() in exts]
+    # Use os.walk instead of pathlib.rglob: rglob can silently skip deep
+    # subdirectories on Windows (long paths), under-reporting files.
+    files = []
+    for dp, _dn, fn in os.walk(folder):
+        base = Path(dp)
+        for f in fn:
+            p = base / f
+            if p.suffix.lower() in exts:
+                files.append(p)
     if sort == "name_asc":
         files.sort(key=lambda p: _queue_name(folder, p).lower())
     elif sort == "name_desc":
@@ -51,7 +59,11 @@ def scan_folder(folder: Path, extensions: list[str], sort: str) -> list[FileItem
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     items: list[FileItem] = []
     for p in files:
-        stat = p.stat()
+        try:
+            stat = p.stat()
+        except OSError:
+            # Long paths (>260 chars) need the extended-length prefix on Windows.
+            stat = Path("\\\\?\\" + str(p)).stat()
         target_title = _queue_name(folder, p)
         items.append(FileItem(
             path=str(p),
